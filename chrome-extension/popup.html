@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>漫画截图</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>漫画可见区域截图</h1>
+      <p class="notice">仅用于你有权访问的当前可见内容。请勿绕过付费、登录或版权限制。</p>
+
+      <div class="region-actions">
+        <button id="detect" class="detect">① 自动识别区域</button>
+        <button id="select" class="secondary">手动框选</button>
+      </div>
+      <p id="region" class="status">尚未框选</p>
+
+      <label>
+        翻页等待（秒）
+        <input id="delay" type="number" min="0.1" max="30" step="0.1" value="0.5">
+      </label>
+
+      <label>
+        翻页方式
+        <select id="turnMethod">
+          <option value="click-left">点击画面左侧</option>
+          <option value="click-right">点击画面右侧</option>
+          <option value="key-left">发送向左键</option>
+          <option value="key-right">发送向右键</option>
+          <option value="none">不自动翻页</option>
+        </select>
+      </label>
+
+      <button id="apply" class="secondary apply-settings" disabled>应用设置到当前任务</button>
+
+      <label>
+        ZIP 文件名称（不含 .zip）
+        <input id="folder" type="text" maxlength="60">
+      </label>
+
+      <button id="start" class="primary">② 开始批量截图</button>
+      <button id="stop" class="danger">停止当前任务</button>
+      <p id="message" class="message"></p>
+      <p class="hint">截图会持续进行并暂存在内存中；请根据翻页动画自行设置等待时间。手动或自动停止后只下载一个 ZIP。</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

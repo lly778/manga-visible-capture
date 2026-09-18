@@ -1,0 +1,21 @@
+:root { color-scheme: light; font-family: "Microsoft YaHei UI", system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; width: 350px; background: #f8fafc; color: #0f172a; }
+main { padding: 18px; }
+h1 { margin: 0 0 8px; font-size: 19px; }
+.notice { margin: 0 0 16px; color: #475569; font-size: 12px; line-height: 1.55; }
+label { display: block; margin: 12px 0; font-size: 13px; font-weight: 600; }
+input, select, button { width: 100%; border-radius: 8px; font: inherit; }
+input, select { margin-top: 5px; padding: 9px 10px; border: 1px solid #cbd5e1; background: white; }
+button { padding: 10px 12px; border: 0; cursor: pointer; font-weight: 700; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.primary { background: #2563eb; color: white; margin-top: 6px; }
+.secondary { background: #e2e8f0; color: #0f172a; }
+.apply-settings { margin-top: 2px; }
+.detect { background: #dbeafe; color: #1d4ed8; }
+.region-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.danger { margin-top: 8px; background: #fee2e2; color: #991b1b; }
+.status, .message, .hint { font-size: 12px; line-height: 1.5; }
+.status { margin: 6px 0 0; color: #475569; }
+.message { min-height: 18px; margin: 10px 0 0; color: #1d4ed8; }
+.hint { margin: 8px 0 0; color: #64748b; }

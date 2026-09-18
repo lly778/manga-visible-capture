@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "可见漫画区域批量截图",
+  "version": "1.5.2",
+  "description": "识别浏览器中实际可见的漫画区域，按页截图并在停止后打包为 ZIP。",
+  "permissions": ["activeTab", "scripting", "downloads", "offscreen", "storage"],
+  "action": {
+    "default_title": "漫画可见区域截图",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
