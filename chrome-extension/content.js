@@ -316,8 +316,8 @@
       return;
     }
     const x = method === "click-left"
-      ? state.region.left + state.region.width * 0.08
-      : state.region.left + state.region.width * 0.92;
+      ? state.region.left + 1
+      : state.region.left + state.region.width - 1;
     const y = state.region.top + state.region.height * 0.5;
     const target = document.elementFromPoint(x, y);
     if (!target) return;

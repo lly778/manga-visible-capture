@@ -16,6 +16,19 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
+function samePageFingerprint(previous, current) {
+  if (!previous || !current || previous.length !== current.length || !current.length) return false;
+  let changed = 0;
+  let totalDifference = 0;
+  for (let i = 0; i < current.length; i++) {
+    const difference = Math.abs(previous[i] - current[i]);
+    totalDifference += difference;
+    if (difference >= 24) changed++;
+  }
+  return changed <= Math.max(8, Math.floor(current.length * 0.02)) &&
+    totalDifference / current.length <= 5;
+}
+
 function dosDateTime(date = new Date()) {
   const year = Math.max(1980, date.getFullYear());
   return {
@@ -95,8 +108,22 @@ async function cropToBytes(message) {
   const canvas = new OffscreenCanvas(sw, sh);
   canvas.getContext("2d", { alpha: false }).drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
   bitmap.close();
+  const sampleSize = 64;
+  const sample = new OffscreenCanvas(sampleSize, sampleSize);
+  const context = sample.getContext("2d", { willReadFrequently: true });
+  const insetX = Math.floor(sw * 0.03);
+  const insetY = Math.floor(sh * 0.03);
+  context.drawImage(canvas, insetX, insetY, sw - insetX * 2, sh - insetY * 2,
+    0, 0, sampleSize, sampleSize);
+  const pixels = context.getImageData(0, 0, sampleSize, sampleSize).data;
+  const fingerprint = new Uint8Array(sampleSize * sampleSize);
+  for (let i = 0; i < fingerprint.length; i++) {
+    const offset = i * 4;
+    fingerprint[i] = Math.round(pixels[offset] * 0.299 +
+      pixels[offset + 1] * 0.587 + pixels[offset + 2] * 0.114);
+  }
   const blob = await canvas.convertToBlob({ type: "image/png" });
-  return new Uint8Array(await blob.arrayBuffer());
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), fingerprint };
 }
 
 async function trimBlackBorders(message) {
@@ -255,13 +282,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === "crop-store") {
       const files = sessions.get(message.sessionId);
       if (!files) throw new Error("临时截图任务已失效，请重新开始。");
-      const bytes = await cropToBytes(message);
+      const { bytes, fingerprint } = await cropToBytes(message);
       const crc = crc32(bytes);
       const previous = files[files.length - 1];
-      if (previous && previous.bytes.length === bytes.length && previous.crc === crc) {
+      if (previous && (
+        (previous.bytes.length === bytes.length && previous.crc === crc) ||
+        samePageFingerprint(previous.fingerprint, fingerprint)
+      )) {
         return { ok: true, count: files.length, bytes: bytes.length, duplicate: true };
       }
-      files.push({ name: message.filename, bytes, crc });
+      files.push({ name: message.filename, bytes, crc, fingerprint });
       return { ok: true, count: files.length, bytes: bytes.length, duplicate: false };
     }
     if (message.action === "prepare-export") {
