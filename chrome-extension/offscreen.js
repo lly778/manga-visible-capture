@@ -99,6 +99,145 @@ async function cropToBytes(message) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+async function trimBlackBorders(message) {
+  const response = await fetch(message.dataUrl);
+  const bitmap = await createImageBitmap(await response.blob());
+  try {
+    const scaleX = bitmap.width / message.viewport.width;
+    const scaleY = bitmap.height / message.viewport.height;
+    const sourceX = Math.max(0, Math.round(message.region.left * scaleX));
+    const sourceY = Math.max(0, Math.round(message.region.top * scaleY));
+    const sourceWidth = Math.min(bitmap.width - sourceX, Math.round(message.region.width * scaleX));
+    const sourceHeight = Math.min(bitmap.height - sourceY, Math.round(message.region.height * scaleY));
+    if (sourceWidth < 200 || sourceHeight < 200) return message.region;
+
+    const analyze = (width, allowObscuredUpperArea = false) => {
+      const sampleWidth = Math.min(512, width);
+      const canvas = new OffscreenCanvas(sampleWidth, 96);
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      context.drawImage(bitmap, sourceX, sourceY, width, sourceHeight,
+        0, 0, sampleWidth, 96);
+      const pixels = context.getImageData(0, 0, sampleWidth, 96).data;
+      const isDarkBorderColumn = (x) => {
+        let dark = 0;
+        let lowerDark = 0;
+        for (let y = 10; y < 70; y += 2) {
+          const offset = (y * sampleWidth + x) * 4;
+          const red = pixels[offset];
+          const green = pixels[offset + 1];
+          const blue = pixels[offset + 2];
+          if (Math.max(red, green, blue) <= 95 &&
+              Math.max(red, green, blue) - Math.min(red, green, blue) <= 20) dark++;
+        }
+        if (dark / 30 >= 0.8) return true;
+        if (!allowObscuredUpperArea) return false;
+        for (let y = 72; y < 96; y += 2) {
+          const offset = (y * sampleWidth + x) * 4;
+          const red = pixels[offset];
+          const green = pixels[offset + 1];
+          const blue = pixels[offset + 2];
+          if (Math.max(red, green, blue) <= 95 &&
+              Math.max(red, green, blue) - Math.min(red, green, blue) <= 20) lowerDark++;
+        }
+        return lowerDark / 12 >= 0.85;
+      };
+      const maxSide = Math.floor(sampleWidth * 0.65);
+      const maxOuterStrip = Math.ceil(sampleWidth * 0.02);
+      const borderWidth = (fromLeft) => {
+        let distance = 0;
+        const column = () => fromLeft ? distance : sampleWidth - 1 - distance;
+        while (distance < maxOuterStrip && !isDarkBorderColumn(column())) distance++;
+        const darkStart = distance;
+        while (distance < maxSide && isDarkBorderColumn(column())) distance++;
+        return distance - darkStart >= Math.max(8, Math.round(sampleWidth * 0.03))
+          ? distance : 0;
+      };
+      return { left: borderWidth(true), right: borderWidth(false), sampleWidth };
+    };
+    const recoverPageEdges = (region) => {
+      if (region.width / region.height < 1) return region;
+      const recoverEdge = (current, fromLeft) => {
+        const available = fromLeft ? current.left
+          : message.viewport.width - current.left - current.width;
+        if (available <= 0) return current;
+        const edgeX = Math.round((fromLeft ? current.left : current.left + current.width) * scaleX);
+        const probeWidth = Math.min(Math.round(available * scaleX),
+          Math.round(region.width * scaleX * 0.06));
+        if (probeWidth < 12) return current;
+        const sampleWidth = Math.min(96, probeWidth);
+        const canvas = new OffscreenCanvas(sampleWidth, 96);
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.drawImage(bitmap, fromLeft ? edgeX - probeWidth : edgeX,
+          sourceY, probeWidth, sourceHeight, 0, 0, sampleWidth, 96);
+        const pixels = context.getImageData(0, 0, sampleWidth, 96).data;
+        const darkColumn = (x) => {
+          let dark = 0;
+          for (let y = 10; y < 70; y += 2) {
+            const offset = (y * sampleWidth + x) * 4;
+            const red = pixels[offset];
+            const green = pixels[offset + 1];
+            const blue = pixels[offset + 2];
+            if (Math.max(red, green, blue) <= 95 &&
+                Math.max(red, green, blue) - Math.min(red, green, blue) <= 20) dark++;
+          }
+          return dark / 30 >= 0.8;
+        };
+        for (let distance = 3; distance <= sampleWidth - 6; distance++) {
+          const x = fromLeft ? sampleWidth - 1 - distance : distance;
+          if (darkColumn(x)) {
+            let run = 1;
+            while (run < 6 && darkColumn(fromLeft ? x - run : x + run)) run++;
+            if (run === 6) {
+              const extra = Math.round(distance * probeWidth / sampleWidth / scaleX);
+              if (extra > 3) {
+                const amount = Math.min(extra, available);
+                return { ...current,
+                  left: fromLeft ? current.left - amount : current.left,
+                  width: current.width + amount };
+              }
+              return current;
+            }
+            distance += run - 1;
+          }
+        }
+        return current;
+      };
+      return recoverEdge(recoverEdge(region, true), false);
+    };
+    const { left, right, sampleWidth } = analyze(sourceWidth, true);
+    if (sampleWidth - left - right < sampleWidth * 0.25) {
+      return message.region;
+    }
+    const trimmedLeft = Math.round(left * message.region.width / sampleWidth);
+    const trimmedRight = Math.round(right * message.region.width / sampleWidth);
+    const pageWidth = message.region.width - trimmedRight;
+    const portraitPage = !left && pageWidth >= 180 &&
+      pageWidth / message.region.height >= 0.45 &&
+      pageWidth / message.region.height <= 0.95 &&
+      message.region.left <= message.viewport.width * 0.3 &&
+      pageWidth <= message.viewport.width * 0.5;
+    if (portraitPage) {
+      const targetWidth = Math.round(pageWidth * 2);
+      if (targetWidth > message.viewport.width - message.region.left) return message.region;
+      if (targetWidth <= message.region.width) {
+        // The initial region already contains the blank second-page slot.
+        return { ...message.region, width: targetWidth };
+      }
+      // A left-positioned portrait page is one half of the spread. The blank
+      // right-hand slot is needed even if pixel sampling is obstructed.
+      return { ...message.region, width: targetWidth };
+    }
+    if (!trimmedLeft && !trimmedRight) return recoverPageEdges(message.region);
+    return recoverPageEdges({
+      ...message.region,
+      left: message.region.left + trimmedLeft,
+      width: message.region.width - trimmedLeft - trimmedRight
+    });
+  } finally {
+    bitmap.close();
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.target !== "offscreen") return;
   (async () => {
@@ -109,6 +248,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === "discard") {
       sessions.delete(message.sessionId);
       return { ok: true };
+    }
+    if (message.action === "trim-black-borders") {
+      return { ok: true, region: await trimBlackBorders(message) };
     }
     if (message.action === "crop-store") {
       const files = sessions.get(message.sessionId);

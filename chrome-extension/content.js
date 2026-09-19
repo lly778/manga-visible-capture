@@ -46,7 +46,7 @@
     return { left, top, width: right - left, height: bottom - top };
   }
 
-  function autoDetectRegion() {
+  async function autoDetectRegion() {
     const viewportArea = innerWidth * innerHeight;
     const centerX = innerWidth / 2;
     const centerY = innerHeight / 2;
@@ -61,7 +61,11 @@
     ];
     const candidates = new Set(document.querySelectorAll(selectors.join(",")));
     for (const element of [...candidates]) {
-      if (element.matches("canvas,img,picture,svg") && element.parentElement) candidates.add(element.parentElement);
+      let parent = element.parentElement;
+      for (let depth = 0; depth < 4 && parent && parent !== document.body; depth++) {
+        candidates.add(parent);
+        parent = parent.parentElement;
+      }
     }
 
     let best = null;
@@ -76,7 +80,9 @@
       const areaRatio = area / viewportArea;
       if (areaRatio < 0.08) continue;
       const visibleRatio = area / Math.max(1, raw.width * raw.height);
-      if (visibleRatio < 0.55) continue;
+      const tallVisibleImage = raw.height > innerHeight * 1.2 &&
+        rect.height >= innerHeight * 0.7 && rect.width / Math.max(1, raw.width) >= 0.8;
+      if (visibleRatio < 0.55 && !tallVisibleImage) continue;
 
       const tag = element.tagName.toLowerCase();
       const identity = `${element.id} ${element.className || ""}`.toLowerCase();
@@ -90,12 +96,43 @@
       if (/viewer|comic|manga|episode|page|spread/.test(identity)) score += 36;
       if (aspect >= 0.42 && aspect <= 2.35) score += 18;
       if (rect.height >= innerHeight * 0.55) score += 20;
+      if (rect.height >= innerHeight * 0.85) score += 35;
+      if (rect.height < innerHeight * 0.5) score -= 45;
       if (areaRatio > 0.97) score -= 75;
       if (/header|footer|nav|toolbar|menu|banner|advert|recommend/.test(identity)) score -= 90;
       if (style.position === "fixed" && areaRatio < 0.35) score -= 45;
       if (!best || score > best.score) best = { element, region: rect, score };
     }
     if (!best || best.score < 70) return null;
+
+    const outer = best.region;
+    const outerBottom = outer.top + outer.height;
+    let imageTop = null;
+    let imageBottom = null;
+    for (const element of candidates) {
+      if (!/^(IMG|CANVAS|PICTURE|SVG)$/.test(element.tagName)) continue;
+      let parent = element.parentElement;
+      let inside = false;
+      while (parent && parent !== document.body) {
+        if (parent === best.element) { inside = true; break; }
+        parent = parent.parentElement;
+      }
+      if (!inside) continue;
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) < 0.08) continue;
+      const image = clampRect(element.getBoundingClientRect());
+      const imageBottomCandidate = image.top + image.height;
+      const aspect = image.width / image.height;
+      if (image.top < outer.top - 8 || imageBottomCandidate > outerBottom + 8 ||
+          image.height < outer.height * 0.75 || image.width < outer.width * 0.3 ||
+          aspect < 0.4 || aspect > 2.2 ||
+          image.left < outer.left - 8 || image.left + image.width > outer.left + outer.width + 8) continue;
+      imageTop = Math.min(imageTop ?? Infinity, image.top);
+      imageBottom = Math.max(imageBottom ?? 0, imageBottomCandidate);
+    }
+    if (imageTop !== null && imageBottom !== null) {
+      best.region = { ...outer, top: imageTop, height: imageBottom - imageTop };
+    }
 
     const margin = 2;
     const region = {
@@ -106,9 +143,33 @@
     };
     region.width = Math.min(region.width, innerWidth - region.left);
     region.height = Math.min(region.height, innerHeight - region.top);
-    saveRegion(region);
-    previewDetectedRegion(region);
-    return region;
+    let refined = region;
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: "trim-black-borders",
+        region,
+        viewport: { width: innerWidth, height: innerHeight }
+      });
+      if (result?.ok && result.region) refined = result.region;
+    } catch {
+      // Pixel analysis is optional; keep the DOM-detected region if capture fails.
+    }
+    const rawPage = best.element.getBoundingClientRect();
+    const portraitPage = rawPage.height <= innerHeight * 1.2 &&
+      refined.height >= innerHeight * 0.7 &&
+      refined.width / refined.height >= 0.45 &&
+      refined.width / refined.height <= 0.95 &&
+      refined.left <= innerWidth * 0.3 &&
+      refined.width <= innerWidth * 0.5;
+    if (portraitPage) {
+      const pageWidth = best.region.width / best.region.height <= 0.95
+        ? Math.max(best.region.width, refined.width) : refined.width;
+      const spreadWidth = Math.round(pageWidth * 2);
+      if (spreadWidth <= innerWidth - refined.left) refined.width = spreadWidth;
+    }
+    saveRegion(refined);
+    previewDetectedRegion(refined);
+    return refined;
   }
 
   function previewDetectedRegion(region) {
@@ -280,7 +341,9 @@
     let terminalMessage = "";
     showPanel("准备截图…");
     try {
-      const begin = await chrome.runtime.sendMessage({ action: "begin-capture-session", sessionId });
+      const begin = await chrome.runtime.sendMessage({
+        action: "begin-capture-session", sessionId, zipName: options.folder
+      });
       if (!begin?.ok) throw new Error(begin?.error || "无法创建临时截图任务。");
       await waitUnlessStopped(700);
       for (let i = 1; !state.stopped; i++) {
@@ -363,9 +426,12 @@
     }
     if (message.action === "select-region") { selectRegion(); sendResponse({ ok: true }); return; }
     if (message.action === "auto-detect-region") {
-      const region = autoDetectRegion();
-      sendResponse(region ? { ok: true, region } : { ok: false, error: "没有识别到合适的漫画区域，请改用手动框选。" });
-      return;
+      autoDetectRegion()
+        .then((region) => sendResponse(region
+          ? { ok: true, region }
+          : { ok: false, error: "没有识别到合适的漫画区域，请改用手动框选。" }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
     }
     if (message.action === "update-settings") {
       const methods = new Set(["click-left", "click-right", "key-left", "key-right", "none"]);
