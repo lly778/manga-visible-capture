@@ -157,4 +157,8 @@ $("turnMethod").addEventListener("change", () => {
   saveCaptureSettings(false).catch((error) => show(error.message, true));
 });
 
+$("exports").addEventListener("click", () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL("save.html") });
+});
+
 initialize();

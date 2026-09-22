@@ -1,4 +1,3 @@
-const pendingDownloadNames = new Map();
 const pendingCaptures = new Map();
 const finalizingSessions = new Map();
 const sessionKey = (tabId) => `vmc-capture-${tabId}`;
@@ -8,13 +7,6 @@ async function activeSession(tabId) {
   const key = sessionKey(tabId);
   return (await chrome.storage.session.get(key))[key];
 }
-
-chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  const filename = pendingDownloadNames.get(item.url);
-  if (!filename) return;
-  pendingDownloadNames.delete(item.url);
-  suggest({ filename, conflictAction: "uniquify" });
-});
 
 async function ensureOffscreen() {
   if (!creatingOffscreen) {
@@ -45,30 +37,20 @@ async function exportSession(tabId, sessionId, requestedName) {
     await pendingCaptures.get(tabId)?.catch(() => {});
     await ensureOffscreen();
     const zipName = `${safeName(requestedName, "漫画截图")}.zip`;
-    const prepared = await chrome.runtime.sendMessage({
+    const exportKey = `vmc-export-${sessionId}`;
+    const existing = (await chrome.storage.session.get(exportKey))[exportKey];
+    const prepared = existing || await chrome.runtime.sendMessage({
       target: "offscreen", action: "prepare-export", sessionId
     });
     if (!prepared?.ok) throw new Error(prepared?.error || "ZIP 生成失败");
-    try {
-      pendingDownloadNames.set(prepared.url, zipName);
-      const downloadId = await chrome.downloads.download({
-        url: prepared.url, filename: zipName, saveAs: false, conflictAction: "uniquify"
-      });
-      setTimeout(() => pendingDownloadNames.delete(prepared.url), 60000);
-      await chrome.runtime.sendMessage({
-        target: "offscreen", action: "finish-export", sessionId, url: prepared.url
-      });
-      if ((await activeSession(tabId))?.sessionId === sessionId) {
-        await chrome.storage.session.remove(sessionKey(tabId));
-      }
-      return { ok: true, downloadId, count: prepared.count, size: prepared.size };
-    } catch (error) {
-      pendingDownloadNames.delete(prepared.url);
-      await chrome.runtime.sendMessage({
-        target: "offscreen", action: "finish-export", sessionId, url: prepared.url
-      }).catch(() => {});
-      throw error;
+    await chrome.storage.session.set({
+      [exportKey]: { ...prepared, sessionId, filename: existing?.filename || zipName }
+    });
+    await chrome.tabs.create({ url: chrome.runtime.getURL(`save.html#${encodeURIComponent(sessionId)}`) });
+    if ((await activeSession(tabId))?.sessionId === sessionId) {
+      await chrome.storage.session.remove(sessionKey(tabId));
     }
+    return { ok: true, pendingSave: true, count: prepared.count, size: prepared.size };
   })();
   finalizingSessions.set(sessionId, task);
   task.then(() => setTimeout(() => finalizingSessions.delete(sessionId), 60000),
@@ -114,11 +96,27 @@ function safeName(value, fallback) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.target === "offscreen") return;
   const actions = new Set([
+    "complete-saved-export",
     "begin-capture-session", "capture-and-store", "export-capture-session",
     "discard-capture-session", "trim-black-borders"
   ]);
   if (!actions.has(message.action)) return;
   (async () => {
+    if (message.action === "complete-saved-export") {
+      if (sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL("save.html")) {
+        throw new Error("请从 ZIP 保存页完成保存。");
+      }
+      const key = `vmc-export-${message.sessionId}`;
+      const entry = (await chrome.storage.session.get(key))[key];
+      if (entry) {
+        const result = await chrome.runtime.sendMessage({
+          target: "offscreen", action: "finish-export", sessionId: entry.sessionId, url: entry.url
+        });
+        if (!result?.ok) throw new Error(result?.error || "暂存清理失败");
+        await chrome.storage.session.remove(key);
+      }
+      return { ok: true };
+    }
     await ensureOffscreen();
     if (message.action === "begin-capture-session") {
       const begun = await chrome.runtime.sendMessage({

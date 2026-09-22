@@ -383,7 +383,7 @@
             zipName: options.folder
           });
           if (!exported?.ok) throw new Error(exported?.error || "ZIP 生成失败。");
-          showPanel(`${terminalMessage} ZIP 已开始下载。`, false);
+          showPanel(`${terminalMessage} 请在保存页点击“保存 ZIP”。`, false);
         } catch (error) {
           showPanel(`${terminalMessage} 但 ZIP 生成失败：${error.message}`, false);
         }
