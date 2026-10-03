@@ -351,32 +351,6 @@
     return false;
   }
 
-  function readerHasFinished() {
-    if (location.hostname === "kimicomi.com") {
-      // Multiple episode viewers can remain in the DOM. Check each visible
-      // terminal card, never the first matching hidden viewer or a footer link.
-      return [...document.querySelectorAll('[id="xCVLastPage"]')].some(end => {
-        const viewer = end.closest?.("#comici-viewer");
-        const favorite = end.querySelector("#xCVLastPageFavBtn");
-        const top = end.querySelector("#xCVLastPageTopBtn");
-        if (!viewer?.classList?.contains("mode-last-page") || !intersectsRegion(end) ||
-            !favorite || !top || !intersectsRegion(favorite) || !intersectsRegion(top)) return false;
-        return ![...viewer.querySelectorAll(".-cv-page")].some(page =>
-          !page.classList.contains("mode-last") && !page.classList.contains("mode-empty") && intersectsRegion(page));
-      });
-    }
-    if (location.hostname !== "yanmaga.jp") return false;
-    const popup = document.getElementById("wrap-popup");
-    const frame = document.getElementById("rentalEpisodeFrame");
-    const content = document.getElementById("content");
-    if (!popup?.classList?.contains("rental") || !popup.classList.contains("active") ||
-        !frame || frame.tagName !== "IFRAME" || frame.closest?.("#wrap-popup") !== popup ||
-        !content?.classList?.contains("pages") || !intersectsRegion(popup)) return false;
-    // This is the reader's end dialog, rather than a manga page. Read only
-    // its visible DOM; never close it, alter the toolbar or inspect the iframe.
-    return ![...content.children].some(element => /^content-p\d+$/.test(element.id) && intersectsRegion(element));
-  }
-
   function clickAt(target, x, y) {
     const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window, button: 0 };
     target.dispatchEvent(new PointerEvent("pointerdown", init));
@@ -420,6 +394,35 @@
     } finally {
       if (panel) panel.style.visibility = "visible";
     }
+  }
+
+  function portraitHasOtherContent(columns) {
+    const region = state.region;
+    // The spare half may be blank, or it may contain HTML controls and SVGs
+    // whose pixels the raster sampler cannot observe. Check the interior so
+    // page-edge navigation and toolbars do not invalidate a blank first page.
+    const selector = "a,button,input,select,textarea,svg,h1,h2,h3,h4,h5,h6,p,label,[role='button'],[role='link']";
+    for (const element of document.querySelectorAll(selector)) {
+      if (!intersectsRegion(element)) continue;
+      const rect = element.getBoundingClientRect();
+      const left = Math.max(rect.left, region.left + region.width * 0.04);
+      const right = Math.min(rect.right, region.left + region.width * 0.96);
+      const top = Math.max(rect.top, region.top + region.height * 0.12);
+      const bottom = Math.min(rect.bottom, region.top + region.height * 0.88);
+      if (right <= left || bottom <= top) continue;
+      const area = (right - left) * (bottom - top);
+      if (area < region.width * region.height * 0.0005) continue;
+      const rasterOverlap = columns.reduce((sum, column) => sum +
+        Math.max(0, Math.min(right, column.right) - Math.max(left, column.left)) *
+        Math.max(0, Math.min(bottom, column.bottom) - Math.max(top, column.top)), 0);
+      if (rasterOverlap > area * 0.25) continue;
+      const x = (left + right) / 2;
+      const y = (top + bottom) / 2;
+      if (columns.some(column => x >= column.left && x <= column.right && y >= column.top && y <= column.bottom)) continue;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === element || element.contains?.(hit)) return true;
+    }
+    return false;
   }
 
   function createRenderedSampler() {
@@ -495,13 +498,16 @@
           return width >= state.region.width * 0.35 && height >= state.region.height * 0.8 &&
             height >= width * 1.05 && column.area >= width * height * 0.95;
         });
-        const covered = coveredArea >= state.region.width * state.region.height * 0.8 || completePortrait;
+        const coversSpread = coveredArea >= state.region.width * state.region.height * 0.8;
+        const covered = coversSpread || completePortrait;
+        const screenRequired = !coversSpread && completePortrait && portraitHasOtherContent(columns);
         // Sliding tiles can briefly leave a gap, or their replacements may
         // still be loading. Stay in fast detection and wait for those tiles;
         // do not switch samplers in the middle of a turn.
-        return { fingerprint: pixels, layout: JSON.stringify(layout), loading: loading || !covered, covered };
+        return { fingerprint: pixels, layout: JSON.stringify(layout), loading: loading || !covered, covered, screenRequired };
       };
-      if (!read().covered) return null;
+      const initial = read();
+      if (!initial.covered || initial.screenRequired) return null;
       return { intervalMs: 40, quietMs: 120, read };
     } catch {
       return null;
@@ -558,7 +564,6 @@
       }
       if (state.stopped) return null;
       assertCapturePage(startUrl);
-      if (readerHasFinished()) return { changed: false, finished: true };
       const waitStart = performance.now();
       // Keep screenshot probes rate-limited, but retry readable page pixels
       // between them. An advertisement on the old page must not lock the new
@@ -569,7 +574,6 @@
       pausedMs += Math.max(0, performance.now() - waitStart - waited);
       if (state.stopped) return null;
       assertCapturePage(startUrl);
-      if (readerHasFinished()) return { changed: false, finished: true };
       elapsed = performance.now() - startedAt - pausedMs;
       let recoveryFrame = null;
       let recoveryStable = false;
@@ -577,6 +581,10 @@
         try {
           recoverySampler ||= createRenderedSampler();
           recoveryFrame = recoverySampler?.read();
+          if (recoveryFrame?.screenRequired) {
+            recoverySampler = null;
+            recoveryFrame = null;
+          }
         } catch {
           recoverySampler = null;
         }
@@ -598,8 +606,8 @@
       } catch (error) {
         if (sampler.intervalMs !== 40) throw error;
       }
-      if (!frame) {
-        // A cross-origin recommendation can become visible beside the last
+      if (!frame || frame.screenRequired) {
+        // An unreadable image or HTML content can appear beside the last
         // page. Fall back to Chrome screenshots and compare with the saved
         // pre-turn screen crop, never with the renderer's different pixels.
         sampler = createScreenSampler(startUrl);
@@ -619,7 +627,6 @@
         anchor = null;
         continue;
       }
-      if (readerHasFinished()) return { changed: false, finished: true };
       if (sampler.kind === "screen") {
         nextScreenProbeMs = elapsed + sampler.intervalMs;
         // The raw fingerprint cannot be compared to a screenshot baseline.
@@ -628,12 +635,13 @@
         if (recoveryStable) {
           let after;
           try { after = recoverySampler.read(); } catch { recoverySampler = null; }
-          if (!after?.loading && !regionIsBusy() && sameFrame(recoveryAnchor, after)) {
+          if (after?.screenRequired) recoverySampler = null;
+          if (after && !after.loading && !after.screenRequired && !regionIsBusy() && sameFrame(recoveryAnchor, after)) {
             verifiedRecovery = after;
             if (!requireChange || baselineFrame && !sameFrame(baselineFrame, frame)) {
               state.waitStatus = "";
               return { elapsedMs: Math.ceil(elapsed), settledMs: Math.ceil(recoverySince),
-                frame, fingerprint: frame.fingerprint, changed: true };
+                frame, fingerprint: frame.fingerprint, detectionMode: "rendered", changed: true };
             }
           } else {
             recoveryAnchor = null;
@@ -658,7 +666,8 @@
       if (changed && stable) {
         state.waitStatus = "";
         return { elapsedMs: Math.ceil(elapsed), settledMs: Math.ceil(stableSince),
-          frame, fingerprint: frame.fingerprint, changed: true };
+          frame, fingerprint: frame.fingerprint,
+          detectionMode: sampler.kind === "screen" ? "screen" : "rendered", changed: true };
       }
       if (!changed && !loading && stable && elapsed >= noChangeTimeoutMs) {
         state.waitStatus = "";
@@ -705,11 +714,8 @@
     const startUrl = location.href;
     const sessionId = crypto.randomUUID();
     const recentTurnMs = [];
+    let consecutiveSlowPages = 0;
     let terminalMessage = "";
-    const finishAtReaderEnd = () => {
-      state.stopped = true;
-      terminalMessage = `检测到阅读结束页面，已自动停止，共截取 ${state.completed} 张。`;
-    };
     showPanel("准备截图…");
     remove("vmc-detect-preview");
     try {
@@ -719,8 +725,8 @@
       if (!begin?.ok) throw new Error(begin?.error || "无法创建临时截图任务。");
       await waitWhilePopupOpen();
       const initial = await waitForStablePage({ startUrl });
-      if (initial?.finished) finishAtReaderEnd();
       let settledFrame = initial?.frame;
+      let settledDetectionMode = initial?.detectionMode;
       for (let i = 1; !state.stopped; i++) {
         await waitWhilePopupOpen();
         if (state.stopped) break;
@@ -729,7 +735,15 @@
           throw new Error("网页页码或地址发生变化，任务已停止。");
         }
         if (state.stopped) break;
-        if (readerHasFinished()) { finishAtReaderEnd(); break; }
+        // Count completed page checks, not screenshot probes. A page that
+        // recovered fast confirmation uses a screen sample only to verify the
+        // turn and must break the consecutive-slow sequence.
+        consecutiveSlowPages = settledDetectionMode === "screen" ? consecutiveSlowPages + 1 : 0;
+        if (consecutiveSlowPages >= 2) {
+          state.stopped = true;
+          terminalMessage = `连续两页使用慢检测，已自动停止，第二页未保存，共截取 ${state.completed} 张。`;
+          break;
+        }
         showPanel(`正在保存第 ${i} 张…`);
         const captured = await capture(sessionId, i, settledFrame?.sampleId);
         settledFrame = null;
@@ -752,7 +766,6 @@
           if (state.stopped) break;
           assertCapturePage(startUrl);
           if (state.stopped) break;
-          if (readerHasFinished()) { finishAtReaderEnd(); break; }
           const startedAt = performance.now();
           turnPage(turnOptions.turnMethod);
           showPanel(`已保存 ${i} 张，等待翻页…`);
@@ -765,13 +778,12 @@
               ? Math.min(8000, Math.max(1200, Math.max(...recentTurnMs) * 2)) : 8000,
             requireChange: turnOptions.turnMethod !== "none"
           });
-          if (settled?.finished) {
-            finishAtReaderEnd();
-          } else if (settled && !settled.changed) {
+          if (settled && !settled.changed) {
             state.stopped = true;
             terminalMessage = `未检测到翻页变化，已自动停止，共截取 ${state.completed} 张。`;
           } else if (settled?.changed) {
             settledFrame = settled.frame;
+            settledDetectionMode = settled.detectionMode;
             recentTurnMs.push(settled.settledMs);
             if (recentTurnMs.length > 4) recentTurnMs.shift();
           }

@@ -92,120 +92,36 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
 
 const waitOptions = { startUrl: 'https://test/manga', baseline: fingerprint(10), requireChange: true };
 
-function installEndDialog(h, { shown = () => h.turns() >= 2, comicVisible = () => !shown(), hidden = false,
-  active = true, hostname = 'yanmaga.jp' } = {}) {
-  const rect = (visible) => ({ left: visible ? 0 : 600, top: 0,
-    right: visible ? 500 : 1100, bottom: 500, width: 500, height: 500 });
-  const popup = { classList: { contains: value => value === 'rental' || value === 'active' && active },
-    getBoundingClientRect: () => rect(shown()) };
+test('a Yanmaga end dialog uses ordinary stability detection without a site-specific stop', async () => {
+  const h = harness();
+  const popup = { classList: { contains: value => ['rental', 'active'].includes(value) },
+    getBoundingClientRect: h.image.getBoundingClientRect };
   const frame = { tagName: 'IFRAME', closest: () => popup };
-  const comic = { id: 'content-p8', getBoundingClientRect: () => rect(comicVisible()) };
-  const content = { classList: { contains: value => value === 'pages' }, children: [comic] };
-  h.context.location.hostname = hostname;
+  const content = { classList: { contains: value => value === 'pages' }, children: [] };
+  h.context.location.hostname = 'yanmaga.jp';
   h.context.document.getElementById = id => ({ 'wrap-popup': popup, rentalEpisodeFrame: frame, content })[id];
-  h.context.getComputedStyle = element => ({ display: hidden && element === popup ? 'none' : 'block',
-    visibility: 'visible', opacity: '1' });
-  return { popup, frame, content };
-}
-
-test('an end dialog with alternating toolbar backgrounds stops before storing it or clicking again', async () => {
-  const h = harness({ reusableSamples: true,
-    frame: (_time, _probe, turns) => fingerprint(turns === 0 ? 10 : turns === 1 ? 100 : turns % 2 ? 150 : 230) });
-  installEndDialog(h);
-  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
-  const captures = h.messages.filter(message => message.action === 'capture-and-store');
-  const lastProbe = h.messages.filter(message => message.action === 'sample-region').at(-1);
-  assert.equal(captures.length, 2, 'save both comic frames including the final one');
-  assert.equal(h.api.state.completed, 2);
-  assert.equal(h.turns(), 2, 'never click the terminal screen again');
-  assert.equal(h.now(), captures[1].at, 'the already visible end dialog adds no detection wait');
-  assert.ok(lastProbe.at <= captures[1].at, 'do not take probes of the end dialog');
-  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
-  assert.match(h.label.textContent, /阅读结束页面/);
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.equal(result.finished, undefined);
+  assert.equal(result.changed, true);
+  assert.ok(h.messages.some(message => message.action === 'sample-region'));
 });
 
-test('a visible end dialog at the start creates no screenshots and discards the empty task', async () => {
+test('a KimiComi final card uses ordinary stability detection without a site-specific stop', async () => {
   const h = harness();
-  installEndDialog(h, { shown: () => true, comicVisible: () => false });
-  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
-  assert.equal(h.turns(), 0);
-  assert.equal(h.messages.some(message => ['sample-region', 'capture-and-store'].includes(message.action)), false);
-  assert.equal(h.messages.filter(message => message.action === 'discard-capture-session').length, 1);
-});
-
-test('a hidden or inactive dialog and a dialog beside visible comic cannot trigger the end stop', async () => {
-  for (const options of [{ hidden: true }, { active: false }, { comicVisible: () => true }, { hostname: 'other.test' }]) {
-    const h = harness();
-    installEndDialog(h, { shown: () => true, comicVisible: () => false, ...options });
-    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
-    assert.equal(result.changed, true);
-    assert.equal(result.finished, undefined);
-    assert.ok(h.messages.some(message => message.action === 'sample-region'));
-  }
-});
-
-test('an end dialog appearing during a probe wait is detected without taking its screenshot', async () => {
-  const h = harness();
-  installEndDialog(h, { shown: () => h.now() >= 100, comicVisible: () => h.now() < 100 });
-  const result = await h.api.waitForStablePage(waitOptions);
-  assert.equal(result.finished, true);
-  assert.equal(h.messages.length, 0);
-});
-
-function installComiciEnd(h, { shown = () => h.turns() >= 2, comicVisible = () => !shown(),
-  emptyVisible = true, hiddenFirst = true, missingButtons = false, inactive = false } = {}) {
-  const rect = (visible) => ({ left: visible ? 0 : -1000, top: 0,
-    right: visible ? 500 : -500, bottom: 500, width: 500, height: 500 });
-  const classes = (...names) => ({ contains: name => names.includes(name) });
-  const end = { classList: classes('mode-last'), getBoundingClientRect: () => rect(shown()) };
-  const comic = { classList: classes(), getBoundingClientRect: () => rect(comicVisible()) };
-  const empty = { classList: classes('mode-empty'), getBoundingClientRect: () => rect(emptyVisible) };
-  const viewer = { classList: { contains: name => name === 'mode-last-page' && shown() && !inactive },
-    querySelectorAll: () => [end, comic, empty] };
+  const end = { classList: { contains: name => name === 'mode-last' },
+    getBoundingClientRect: h.image.getBoundingClientRect };
+  const viewer = { classList: { contains: name => name === 'mode-last-page' },
+    querySelectorAll: () => [end] };
   end.closest = selector => selector === '#comici-viewer' ? viewer : null;
-  end.querySelector = () => missingButtons ? null : { parentElement: end, getBoundingClientRect: end.getBoundingClientRect };
-  const hidden = { ...end, getBoundingClientRect: () => rect(false) };
+  end.querySelector = () => ({ parentElement: end, getBoundingClientRect: end.getBoundingClientRect });
   const originalQuery = h.context.document.querySelectorAll;
   h.context.document.querySelectorAll = selector => selector === '[id="xCVLastPage"]'
-    ? [...(hiddenFirst ? [hidden] : []), end] : originalQuery(selector);
+    ? [end] : originalQuery(selector);
   h.context.location.hostname = 'kimicomi.com';
-  return { end, comic, viewer };
-}
-
-test('KimiComi HTML end card stops before a retained fast sampler can wait forever for comic coverage', async () => {
-  const h = harness({ localCanvas: true,
-    frame: (_time, _probe, turns) => fingerprint(turns === 0 ? 10 : 150) });
-  installComiciEnd(h);
-  // The reader has no raster surface on its HTML end card. The existing fast
-  // sampler would otherwise mark that missing coverage as loading forever.
-  h.canvas.getBoundingClientRect = () => ({ left: h.turns() >= 2 ? -1000 : 0, top: 0,
-    right: h.turns() >= 2 ? -500 : 500, bottom: 500, width: 500, height: 500 });
-  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
-  const captures = h.messages.filter(message => message.action === 'capture-and-store');
-  assert.equal(captures.length, 2);
-  assert.equal(h.api.state.completed, 2);
-  assert.equal(h.turns(), 2, 'do not click into the next episode');
-  assert.equal(h.now(), captures[1].at, 'do not wait for end-card image coverage');
-  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
-  assert.match(h.label.textContent, /阅读结束页面/);
-});
-
-test('KimiComi hidden viewers and an empty half do not conceal the visible end card', async () => {
-  const h = harness({ busy: () => true });
-  installComiciEnd(h, { shown: () => true, comicVisible: () => false });
-  const result = await h.api.waitForStablePage(waitOptions);
-  assert.equal(result.finished, true);
-  assert.equal(h.messages.length, 0, 'do not probe or wait for non-comic images');
-});
-
-test('KimiComi never stops at an unloaded comic beside the end card or a hidden/incomplete end card', async () => {
-  for (const options of [{ comicVisible: () => true }, { shown: () => false }, { inactive: true }, { missingButtons: true }]) {
-    const h = harness();
-    installComiciEnd(h, { shown: () => true, comicVisible: () => false, ...options });
-    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
-    assert.equal(result.finished, undefined);
-    assert.equal(result.changed, true);
-  }
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.equal(result.finished, undefined);
+  assert.equal(result.changed, true);
+  assert.ok(h.messages.some(message => message.action === 'sample-region'));
 });
 
 test('automatic mode returns when the page settles without honoring an old fixed delay', async () => {
@@ -301,7 +217,7 @@ test('unstable second page stops the batch and exports only the already captured
   assert.match(h.label.textContent, /画面长时间未稳定/);
 });
 
-test('batch captures a settled second page and stops at an unchanged final page', async () => {
+test('a second consecutive slow page is fully checked but not saved', async () => {
   const h = harness({ frame: (time, _probe, turns, turnedAt) => {
     if (!turns) return fingerprint(10);
     if (turns === 1 && time - turnedAt < 3300) return fingerprint(Math.floor((time - turnedAt) / 100));
@@ -309,10 +225,12 @@ test('batch captures a settled second page and stops at an unchanged final page'
   } });
   await h.api.run({ autoWait: true, delayMs: 100, turnMethod: 'click-left', folder: 'comic' });
   const captures = h.messages.filter((message) => message.action === 'capture-and-store');
-  assert.equal(captures.length, 2);
-  assert.ok(captures[1].at - captures[0].at >= 3850);
-  assert.equal(h.api.state.completed, 2);
-  assert.match(h.label.textContent, /未检测到翻页变化/);
+  assert.equal(captures.length, 1);
+  assert.ok(h.now() - captures[0].at >= 3850, 'identify the second settled page before applying the stop rule');
+  assert.equal(h.api.state.completed, 1);
+  assert.equal(h.turns(), 1, 'do not click past the second slow page');
+  assert.match(h.label.textContent, /连续两页使用慢检测.*第二页未保存/);
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
 });
 
 test('covered preload images cannot block a stable visible canvas', async () => {
@@ -461,6 +379,78 @@ test('the first two portrait pages are as fast as later spreads in a reserved do
   assert.equal(h.messages.filter((message) => message.action === 'sample-region').length, 0);
 });
 
+function installMixedPortrait(h, { htmlVisible = () => true, htmlOnLeft = true,
+  obscured = false, edgeControl = false, hidden = false } = {}) {
+  const canvasLeft = htmlOnLeft ? 250 : 0;
+  h.canvas.getBoundingClientRect = () => ({ left: canvasLeft, top: 0,
+    right: canvasLeft + 250, bottom: 500, width: 250, height: 500 });
+  const controlLeft = (htmlOnLeft ? 0 : 250) + 50;
+  const controlTop = edgeControl ? 470 : 200;
+  const control = { tagName: 'SVG', getBoundingClientRect: () => ({ left: controlLeft,
+    top: controlTop, right: controlLeft + 150, bottom: controlTop + 30, width: 150, height: 30 }) };
+  h.context.document.querySelectorAll = selector => selector === 'canvas,img' ? [h.canvas]
+    : selector === 'img' ? [] : htmlVisible() ? [control] : [];
+  const elementAt = h.context.document.elementFromPoint;
+  h.context.document.elementFromPoint = (x, y) => x >= controlLeft && x <= controlLeft + 150 &&
+    y >= controlTop && y <= controlTop + 30 && !obscured ? control : elementAt(x, y);
+  h.context.getComputedStyle = element => ({ display: 'block', visibility: 'visible',
+    opacity: element === control && hidden ? '0' : '1' });
+  return control;
+}
+
+test('a complete manga half beside visible HTML or SVG content uses slow detection on either side', async () => {
+  for (const htmlOnLeft of [true, false]) {
+    const h = harness({ localCanvas: true });
+    installMixedPortrait(h, { htmlOnLeft });
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.detectionMode, 'screen');
+    assert.ok(h.messages.some(message => message.action === 'sample-region'));
+  }
+});
+
+test('blank first-page padding, hidden content and page-edge controls retain fast detection', async () => {
+  for (const options of [{ htmlVisible: () => false }, { obscured: true }, { edgeControl: true }, { hidden: true }]) {
+    const h = harness({ localCanvas: true });
+    installMixedPortrait(h, options);
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.detectionMode, 'rendered');
+    assert.equal(result.elapsedMs, 160);
+    assert.equal(h.messages.length, 0);
+  }
+});
+
+test('turning from a fast blank-padded page to two HTML mixed pages saves only the first slow page', async () => {
+  const h = harness({ localCanvas: true, frame: (_time, _probe, turns) => fingerprint(10 + turns * 70) });
+  installMixedPortrait(h, { htmlVisible: () => h.turns() > 0 });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.api.state.completed, 2);
+  assert.equal(h.turns(), 2);
+  assert.equal(h.messages.filter(message => message.action === 'capture-and-store').length, 2);
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+  assert.match(h.label.textContent, /连续两页使用慢检测.*第二页未保存/);
+});
+
+test('a normal manga page following an HTML mixed page recovers fast detection and resets the slow count', async () => {
+  const h = harness({ localCanvas: true, frame: (_time, _probe, turns) => fingerprint(10 + turns * 50) });
+  installMixedPortrait(h, { htmlVisible: () => h.turns() !== 1 });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.api.state.completed, 3);
+  assert.equal(h.turns(), 3);
+  assert.equal(h.messages.filter(message => message.action === 'capture-and-store').length, 3);
+  assert.match(h.label.textContent, /连续两页使用慢检测.*第二页未保存/);
+});
+
+test('HTML appearing during recovery verification prevents a fast classification', async () => {
+  let showHtml = true;
+  const h = harness({ localCanvas: true,
+    onTimer: time => { if (time >= 40 && time < 160) showHtml = false; },
+    onScreenSample: () => { showHtml = true; } });
+  installMixedPortrait(h, { htmlVisible: () => showHtml });
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.equal(result.detectionMode, 'screen');
+  assert.ok(result.elapsedMs >= 550);
+});
+
 test('a portrait page clipped during a slide cannot settle as a complete single page', async () => {
   const h = harness({ localImages: true });
   h.image.getBoundingClientRect = () => {
@@ -565,6 +555,44 @@ test('an unreadable advertisement stays slow but the immediately following ordin
   assert.equal(verification.length, 1, 'one screen sample verifies the change after fast stability');
   assert.match(captures[1].sampleId, /^sample-\d+$/, 'reuse the verified sample');
   assert.equal(captures[1].at, verification[0].at, 'no further screenshot wait after verification');
+});
+
+test('a recovered fast page resets the slow-page count even though it is saved from a screen verification sample', async () => {
+  const h = harness({ localCanvas: true, reusableSamples: true,
+    tainted: (_time, turns) => turns !== 1,
+    frame: (_time, _probe, turns) => fingerprint(10 + Math.min(turns, 3) * 70) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 3, 'save slow, recovered fast, then first slow again');
+  assert.match(captures[1].sampleId, /^sample-\d+$/, 'the recovered page uses its verified screenshot');
+  assert.equal(h.turns(), 3, 'stop upon confirming the next consecutive slow page');
+  assert.equal(h.api.state.completed, 3);
+  assert.equal(h.now(), captures[2].at + 1100, 'do not spend an additional end-of-reader wait');
+  assert.match(h.label.textContent, /连续两页使用慢检测.*第二页未保存/);
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+});
+
+test('fast pages followed by two slow pages save only the first slow page', async () => {
+  const h = harness({ localCanvas: true, tainted: (_time, turns) => turns > 0,
+    frame: (_time, _probe, turns) => fingerprint(10 + Math.min(turns, 2) * 70) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 2);
+  assert.equal(h.turns(), 2);
+  assert.equal(h.api.state.completed, 2);
+  assert.match(h.label.textContent, /连续两页使用慢检测.*第二页未保存/);
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+});
+
+test('a new batch resets the consecutive-slow count and can save its first slow page again', async () => {
+  const h = harness({ frame: (_time, _probe, turns) => fingerprint(10 + Math.min(turns, 2) * 70) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'first' });
+  await h.api.run({ turnMethod: 'click-left', folder: 'second' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 2);
+  assert.ok(captures.every(message => message.index === 1));
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 2);
+  assert.equal(h.api.state.completed, 1);
 });
 
 test('readability recovery without a page change cannot save a duplicate or stop before the no-change deadline', async () => {
@@ -685,22 +713,22 @@ test('a small unrelated portrait image cannot select fast page detection', async
   assert.ok(h.messages.some((message) => message.action === 'sample-region'));
 });
 
-test('screen detection reuses the saved page as the baseline without taking a pre-turn probe', async () => {
+test('screen detection reuses the saved page as the baseline when checking the next slow page', async () => {
   const h = harness({ frame: (_time, _probe, turns) => fingerprint(turns ? 150 : 10) });
   await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
   const captures = h.messages.filter((message) => message.action === 'capture-and-store');
-  assert.equal(captures.length, 2);
+  assert.equal(captures.length, 1, 'the second consecutive slow page is not stored');
   const firstCapture = h.messages.indexOf(captures[0]);
   assert.equal(h.messages[firstCapture + 1].action, 'sample-region');
   assert.equal(h.messages[firstCapture + 1].at - captures[0].at, 550);
-  assert.equal(captures[1].at - captures[0].at, 1100);
+  assert.equal(h.now() - captures[0].at, 1100, 'only the post-turn probes are needed');
 });
 
-test('screen detection saves the last confirmed probe on every page instead of requesting a new screenshot', async () => {
+test('the saved slow page reuses its last confirmed probe without requesting a new screenshot', async () => {
   const h = harness({ reusableSamples: true, frame: (_time, _probe, turns) => fingerprint(turns ? 150 : 10) });
   await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
   const captures = h.messages.filter((message) => message.action === 'capture-and-store');
-  assert.equal(captures.length, 2);
+  assert.equal(captures.length, 1);
   for (const capture of captures) {
     const probes = h.messages.slice(0, h.messages.indexOf(capture)).filter((m) => m.action === 'sample-region');
     assert.equal(capture.sampleId, `sample-${probes.length}`);
