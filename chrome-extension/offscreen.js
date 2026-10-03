@@ -122,8 +122,13 @@ async function cropToBytes(message) {
     fingerprint[i] = Math.round(pixels[offset] * 0.299 +
       pixels[offset + 1] * 0.587 + pixels[offset + 2] * 0.114);
   }
-  const blob = await canvas.convertToBlob({ type: "image/png" });
-  return { bytes: new Uint8Array(await blob.arrayBuffer()), fingerprint };
+  if (message.fingerprintOnly) return { fingerprint };
+  const encode = async () => {
+    const blob = await canvas.convertToBlob({ type: "image/png" });
+    return new Uint8Array(await blob.arrayBuffer());
+  };
+  if (message.deferEncoding) return { fingerprint, encode };
+  return { bytes: await encode(), fingerprint };
 }
 
 async function trimBlackBorders(message) {
@@ -279,24 +284,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === "trim-black-borders") {
       return { ok: true, region: await trimBlackBorders(message) };
     }
+    if (message.action === "sample-region") {
+      const { fingerprint } = await cropToBytes({ ...message, fingerprintOnly: true });
+      return { ok: true, fingerprint: Array.from(fingerprint) };
+    }
     if (message.action === "crop-store") {
       const files = sessions.get(message.sessionId);
       if (!files) throw new Error("临时截图任务已失效，请重新开始。");
-      const { bytes, fingerprint } = await cropToBytes(message);
-      const crc = crc32(bytes);
+      const { bytes, fingerprint, encode } = await cropToBytes(message);
+      const crc = bytes ? crc32(bytes) : null;
       const previous = files[files.length - 1];
       if (previous && (
-        (previous.bytes.length === bytes.length && previous.crc === crc) ||
+        (bytes && previous.bytes?.length === bytes.length && previous.crc === crc) ||
         samePageFingerprint(previous.fingerprint, fingerprint)
       )) {
-        return { ok: true, count: files.length, bytes: bytes.length, duplicate: true };
+        return { ok: true, count: files.length, bytes: bytes?.length, duplicate: true };
       }
-      files.push({ name: message.filename, bytes, crc, fingerprint });
-      return { ok: true, count: files.length, bytes: bytes.length, duplicate: false };
+      const file = { name: message.filename, bytes, crc, fingerprint };
+      files.push(file);
+      if (encode) {
+        // The crop is immutable and already belongs to this session. Encoding
+        // may overlap the next page turn; ZIP export awaits every stored crop.
+        file.encoding = encode().then((encoded) => { file.bytes = encoded; file.crc = crc32(encoded); });
+        file.encoding.catch(() => {});
+      }
+      return { ok: true, count: files.length, bytes: bytes?.length, duplicate: false,
+        fingerprint: Array.from(fingerprint) };
     }
     if (message.action === "prepare-export") {
       const files = sessions.get(message.sessionId);
       if (!files?.length) throw new Error("没有可以打包的截图。");
+      await Promise.all(files.map((file) => file.encoding));
       const blob = makeZip(files);
       const url = URL.createObjectURL(blob);
       return { ok: true, url, count: files.length, size: blob.size };

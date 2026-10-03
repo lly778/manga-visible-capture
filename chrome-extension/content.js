@@ -10,6 +10,7 @@
     activeOptions: null,
     popupConnections: 0,
     panel: null,
+    waitStatus: "",
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,12 +18,17 @@
   async function waitUnlessStopped(ms) {
     let remaining = Math.max(0, ms);
     let previous = performance.now();
+    let elapsed = 0;
     while (!state.stopped && remaining > 0) {
       await sleep(Math.min(50, remaining));
       const current = performance.now();
-      if (state.popupConnections === 0) remaining -= current - previous;
+      if (state.popupConnections === 0) {
+        remaining -= current - previous;
+        elapsed += current - previous;
+      }
       previous = current;
     }
+    return elapsed;
   }
 
   async function waitWhilePopupOpen() {
@@ -285,7 +291,7 @@
     state.panel.querySelector(".vmc-stop").style.display = stoppable ? "inline-block" : "none";
   }
 
-  async function capture(sessionId, index) {
+  async function capture(sessionId, index, sampleId = null) {
     state.panel.style.visibility = "hidden";
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     try {
@@ -294,13 +300,324 @@
         region: state.region,
         viewport: { width: innerWidth, height: innerHeight },
         sessionId,
-        index
+        index,
+        ...(sampleId ? { sampleId } : {})
       });
       if (!response?.ok) throw new Error(response?.error || "截图失败");
       return response;
     } finally {
       state.panel.style.visibility = "visible";
     }
+  }
+
+  function assertCapturePage(startUrl) {
+    if (document.visibilityState !== "visible") throw new Error("标签页已不在前台，任务已停止。");
+    if (location.href !== startUrl) throw new Error("网页页码或地址发生变化，任务已停止。");
+  }
+
+  function intersectsRegion(element) {
+    if (!element?.getBoundingClientRect || element.closest?.("#vmc-progress-panel,#vmc-detect-preview")) return false;
+    const rect = element.getBoundingClientRect();
+    const region = state.region;
+    if (rect.width <= 0 || rect.height <= 0 || rect.right <= region.left ||
+        rect.left >= region.left + region.width || rect.bottom <= region.top ||
+        rect.top >= region.top + region.height) return false;
+    const style = getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      const parentStyle = getComputedStyle(parent);
+      if (parentStyle.display === "none" || parentStyle.visibility === "hidden" || Number(parentStyle.opacity) === 0) return false;
+    }
+    return true;
+  }
+
+  function regionIsBusy() {
+    for (const image of document.querySelectorAll("img")) {
+      // Preload layers may have the same bounds as the canvas displaying the
+      // page. Only a substantial image actually on top can block capture.
+      if (image.complete || !intersectsRegion(image)) continue;
+      const rect = image.getBoundingClientRect();
+      const left = Math.max(rect.left, state.region.left);
+      const top = Math.max(rect.top, state.region.top);
+      const right = Math.min(rect.right, state.region.left + state.region.width);
+      const bottom = Math.min(rect.bottom, state.region.top + state.region.height);
+      if ((right - left) * (bottom - top) < state.region.width * state.region.height * 0.15) continue;
+      for (const fx of [0.25, 0.5, 0.75]) {
+        for (const fy of [0.25, 0.5, 0.75]) {
+          if (document.elementFromPoint(left + (right - left) * fx, top + (bottom - top) * fy) === image) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function visibleReaderMenu() {
+    // This reader exposes its toolbar and dimming layer as regular DOM UI.
+    // Closing that layer must happen before a capture or a page-turn click.
+    if (location.hostname !== "yanmaga.jp") return null;
+    const menu = document.getElementById("menu");
+    const backdrop = document.getElementById("menu_transparent");
+    return menu && backdrop && intersectsRegion(backdrop) ? backdrop : null;
+  }
+
+  function clickAt(target, x, y) {
+    const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window, button: 0 };
+    target.dispatchEvent(new PointerEvent("pointerdown", init));
+    target.dispatchEvent(new MouseEvent("mousedown", init));
+    target.dispatchEvent(new PointerEvent("pointerup", init));
+    target.dispatchEvent(new MouseEvent("mouseup", init));
+    target.dispatchEvent(new MouseEvent("click", init));
+  }
+
+  async function closeReaderMenu(startUrl) {
+    if (state.stopped) return false;
+    const backdrop = visibleReaderMenu();
+    if (!backdrop) return false;
+    assertCapturePage(startUrl);
+    showPanel("正在收起阅读器工具栏和遮罩…");
+    const rect = backdrop.getBoundingClientRect();
+    clickAt(backdrop, (Math.max(0, rect.left) + Math.min(innerWidth, rect.right)) / 2,
+      (Math.max(0, rect.top) + Math.min(innerHeight, rect.bottom)) / 2);
+    let waited = 0;
+    while (visibleReaderMenu() && !state.stopped && waited < 1200) {
+      waited += await waitUnlessStopped(40);
+      assertCapturePage(startUrl);
+    }
+    if (visibleReaderMenu() && !state.stopped) {
+      throw new Error("阅读器工具栏未收起，请点击漫画中央关闭工具栏后重新开始。");
+    }
+    return true;
+  }
+
+  // Compare against the first frame in the stable interval to catch slow drift.
+  // Tolerate a small cursor/spinner or rendering noise without accepting a
+  // moving page or a broad fade.
+  function stableFingerprint(previous, current) {
+    if (!previous || !current || previous.length !== current.length || !current.length) return false;
+    let changed = 0;
+    let total = 0;
+    for (let i = 0; i < current.length; i++) {
+      const difference = Math.abs(previous[i] - current[i]);
+      total += Math.min(difference, 16);
+      if (difference >= 12) changed++;
+    }
+    return changed <= Math.floor(current.length * 0.015) && total / current.length <= 0.8;
+  }
+
+  async function sampleRegion(startUrl) {
+    assertCapturePage(startUrl);
+    const panel = state.panel;
+    if (panel) panel.style.visibility = "hidden";
+    try {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      assertCapturePage(startUrl);
+      const result = await chrome.runtime.sendMessage({
+        action: "sample-region", region: state.region,
+        viewport: { width: innerWidth, height: innerHeight }
+      });
+      assertCapturePage(startUrl);
+      if (!result?.ok || !Array.isArray(result.fingerprint) || !result.fingerprint.length) {
+        throw new Error(result?.error || "无法检测翻页画面，请重试。");
+      }
+      return { fingerprint: result.fingerprint, layout: "screen", sampleId: result.sampleId };
+    } finally {
+      if (panel) panel.style.visibility = "visible";
+    }
+  }
+
+  function createRenderedSampler() {
+    // Read only canvases and images already rendered in the visible region. No
+    // image URLs or viewer internals are consulted. Tainted canvases fall back
+    // Chrome screenshots, which have a lower sampling rate.
+    try {
+      const scratch = new OffscreenCanvas(64, 64);
+      const context = scratch.getContext("2d", { willReadFrequently: true });
+      const identities = new WeakMap();
+      let nextIdentity = 1;
+      const read = () => {
+        const pixels = [];
+        const layout = [];
+        const columns = [];
+        let coveredArea = 0;
+        let loading = false;
+        for (const surface of document.querySelectorAll("canvas,img")) {
+          if (!intersectsRegion(surface)) continue;
+          const isImage = surface.tagName === "IMG";
+          const nativeWidth = isImage ? surface.naturalWidth : surface.width;
+          const nativeHeight = isImage ? surface.naturalHeight : surface.height;
+          if (!isImage && (!nativeWidth || !nativeHeight)) continue;
+          const rect = surface.getBoundingClientRect();
+          const left = Math.max(rect.left, state.region.left);
+          const top = Math.max(rect.top, state.region.top);
+          const right = Math.min(rect.right, state.region.left + state.region.width);
+          const bottom = Math.min(rect.bottom, state.region.top + state.region.height);
+          const area = (right - left) * (bottom - top);
+          if (area < state.region.width * state.region.height * 0.01) continue;
+          // A complete portrait page may occupy only half of a region that
+          // reserves room for a spread. Group its aligned image tiles, but do
+          // not treat a page clipped halfway through a slide as complete.
+          if (area >= rect.width * rect.height * 0.95) {
+            let column = columns.find((candidate) =>
+              Math.abs(candidate.left - left) <= 2 && Math.abs(candidate.right - right) <= 2);
+            if (!column) {
+              column = { left, right, top, bottom, area: 0 };
+              columns.push(column);
+            }
+            column.top = Math.min(column.top, top);
+            column.bottom = Math.max(column.bottom, bottom);
+            column.area += area;
+          }
+          if (!identities.has(surface)) identities.set(surface, nextIdentity++);
+          layout.push(identities.get(surface), ...[left, top, right, bottom].map((n) => Math.round(n * 10)));
+          if (isImage) {
+            layout.push(surface.complete, nativeWidth, nativeHeight);
+            if (!surface.complete) loading = true;
+          }
+          for (let element = surface; element; element = element.parentElement) {
+            const style = getComputedStyle(element);
+            layout.push(style.transform, style.opacity);
+          }
+          context.clearRect(0, 0, 64, 64);
+          if (nativeWidth && nativeHeight && (!isImage || surface.complete)) {
+            context.drawImage(surface,
+              (left - rect.left) * nativeWidth / rect.width,
+              (top - rect.top) * nativeHeight / rect.height,
+              (right - left) * nativeWidth / rect.width,
+              (bottom - top) * nativeHeight / rect.height,
+              0, 0, 64, 64);
+          }
+          const data = context.getImageData(0, 0, 64, 64).data;
+          for (let i = 0; i < data.length; i += 4) {
+            pixels.push(Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114));
+          }
+          coveredArea += area;
+        }
+        const completePortrait = columns.some((column) => {
+          const width = column.right - column.left;
+          const height = column.bottom - column.top;
+          return width >= state.region.width * 0.35 && height >= state.region.height * 0.8 &&
+            height >= width * 1.05 && column.area >= width * height * 0.95;
+        });
+        const covered = coveredArea >= state.region.width * state.region.height * 0.8 || completePortrait;
+        // Sliding tiles can briefly leave a gap, or their replacements may
+        // still be loading. Stay in fast detection and wait for those tiles;
+        // do not switch samplers in the middle of a turn.
+        return { fingerprint: pixels, layout: JSON.stringify(layout), loading: loading || !covered, covered };
+      };
+      if (!read().covered) return null;
+      return { intervalMs: 40, quietMs: 120, read };
+    } catch {
+      return null;
+    }
+  }
+
+  function createPageSampler(startUrl) {
+    return createRenderedSampler() || createScreenSampler(startUrl);
+  }
+
+  function createScreenSampler(startUrl) {
+    return {
+      kind: "screen",
+      intervalMs: 550, quietMs: 550,
+      read: () => sampleRegion(startUrl)
+    };
+  }
+
+  function sameFrame(previous, current) {
+    return previous?.layout === current?.layout && stableFingerprint(previous?.fingerprint, current?.fingerprint);
+  }
+
+  async function waitForStablePage({ startUrl, baseline = null, screenBaseline = null, requireChange = false,
+    noChangeTimeoutMs = 8000,
+    sampler = createPageSampler(startUrl), startedAt = performance.now() }) {
+    let pausedMs = 0;
+    let elapsed = performance.now() - startedAt;
+    // Accept fingerprints from saved screenshots only for the screen sampler.
+    let baselineFrame = baseline && (Array.isArray(baseline)
+      ? { fingerprint: baseline, layout: "screen" } : baseline);
+    let anchor = baselineFrame;
+    let stableSince = null;
+    let changed = !requireChange;
+    const timeoutMs = 30000;
+    const progress = (text) => {
+      state.waitStatus = text;
+      showPanel(text);
+    };
+    while (!state.stopped && elapsed < timeoutMs) {
+      if (state.popupConnections > 0) {
+        progress("已暂停检测，请关闭扩展弹窗后继续。");
+        const pauseStart = performance.now();
+        await waitWhilePopupOpen();
+        pausedMs += performance.now() - pauseStart;
+        stableSince = null;
+        anchor = null;
+      }
+      if (await closeReaderMenu(startUrl)) {
+        anchor = null;
+        stableSince = null;
+      }
+      const waitStart = performance.now();
+      const waited = await waitUnlessStopped(sampler.intervalMs);
+      pausedMs += Math.max(0, performance.now() - waitStart - waited);
+      if (state.stopped) return null;
+      assertCapturePage(startUrl);
+      let frame;
+      try {
+        frame = await sampler.read();
+      } catch (error) {
+        if (sampler.intervalMs !== 40) throw error;
+      }
+      if (!frame) {
+        // A cross-origin recommendation can become visible beside the last
+        // page. Fall back to Chrome screenshots and compare with the saved
+        // pre-turn screen crop, never with the renderer's different pixels.
+        sampler = createScreenSampler(startUrl);
+        anchor = null;
+        baselineFrame = screenBaseline?.length
+          ? { fingerprint: screenBaseline, layout: "screen" }
+          : baselineFrame?.layout === "screen" ? baselineFrame : null;
+        stableSince = null;
+        frame = await sampler.read();
+        if (!frame) throw new Error("无法读取当前可见画面，请重试。");
+      }
+      assertCapturePage(startUrl);
+      elapsed = performance.now() - startedAt - pausedMs;
+      if (state.stopped) return null;
+      if (state.popupConnections > 0) {
+        stableSince = null;
+        anchor = null;
+        continue;
+      }
+      changed = !requireChange || Boolean(baselineFrame && !sameFrame(baselineFrame, frame));
+      if (requireChange && !baselineFrame) {
+        throw new Error("翻页中途检测方式发生变化，请停止任务后重新开始截图。");
+      }
+      const loading = frame.loading || regionIsBusy() || visibleReaderMenu();
+      if (loading || !sameFrame(anchor, frame)) {
+        anchor = frame;
+        stableSince = loading ? null : elapsed;
+      } else if (stableSince === null) {
+        stableSince = elapsed;
+      }
+      const stable = stableSince !== null && elapsed - stableSince >= sampler.quietMs;
+      if (changed && stable) {
+        state.waitStatus = "";
+        return { elapsedMs: Math.ceil(elapsed), settledMs: Math.ceil(stableSince),
+          frame, fingerprint: frame.fingerprint, changed: true };
+      }
+      if (!changed && !loading && stable && elapsed >= noChangeTimeoutMs) {
+        state.waitStatus = "";
+        return { elapsedMs: Math.ceil(elapsed), changed: false };
+      }
+      if (loading) progress("等待当前可见漫画图片加载…");
+      else if (!changed) progress(`画面已静止，尚未检测到翻页变化（${(elapsed / 1000).toFixed(1)} 秒）…`);
+      else progress(`正在确认画面稳定（已检测 ${(elapsed / 1000).toFixed(1)} 秒）…`);
+    }
+    if (state.stopped) return null;
+    if (!changed && stableSince !== null && elapsed - stableSince >= sampler.quietMs) {
+      return { elapsedMs: Math.ceil(elapsed), changed: false };
+    }
+    throw new Error("画面长时间未稳定，已停止以避免截到翻页动画或未加载的图片。");
   }
 
   function turnPage(method) {
@@ -311,7 +628,6 @@
       const target = document.activeElement || document.body;
       for (const type of ["keydown", "keyup"]) {
         target.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
-        document.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
       }
       return;
     }
@@ -321,12 +637,7 @@
     const y = state.region.top + state.region.height * 0.5;
     const target = document.elementFromPoint(x, y);
     if (!target) return;
-    const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window, button: 0 };
-    target.dispatchEvent(new PointerEvent("pointerdown", init));
-    target.dispatchEvent(new MouseEvent("mousedown", init));
-    target.dispatchEvent(new PointerEvent("pointerup", init));
-    target.dispatchEvent(new MouseEvent("mouseup", init));
-    target.dispatchEvent(new MouseEvent("click", init));
+    clickAt(target, x, y);
   }
 
   async function run(options) {
@@ -338,14 +649,18 @@
     state.activeOptions = options;
     const startUrl = location.href;
     const sessionId = crypto.randomUUID();
+    const recentTurnMs = [];
     let terminalMessage = "";
     showPanel("准备截图…");
+    remove("vmc-detect-preview");
     try {
       const begin = await chrome.runtime.sendMessage({
         action: "begin-capture-session", sessionId, zipName: options.folder
       });
       if (!begin?.ok) throw new Error(begin?.error || "无法创建临时截图任务。");
-      await waitUnlessStopped(700);
+      await waitWhilePopupOpen();
+      await closeReaderMenu(startUrl);
+      let settledFrame = (await waitForStablePage({ startUrl }))?.frame;
       for (let i = 1; !state.stopped; i++) {
         await waitWhilePopupOpen();
         if (state.stopped) break;
@@ -353,8 +668,11 @@
         if (location.href !== startUrl) {
           throw new Error("网页页码或地址发生变化，任务已停止。");
         }
+        if (await closeReaderMenu(startUrl)) settledFrame = (await waitForStablePage({ startUrl }))?.frame;
+        if (state.stopped) break;
         showPanel(`正在保存第 ${i} 张…`);
-        const captured = await capture(sessionId, i);
+        const captured = await capture(sessionId, i, settledFrame?.sampleId);
+        settledFrame = null;
         if (captured.duplicate) {
           state.stopped = true;
           terminalMessage = `检测到翻页后画面未变化，已自动停止，共截取 ${state.completed} 张。`;
@@ -364,9 +682,41 @@
         if (!state.stopped) {
           await waitWhilePopupOpen();
           if (state.stopped) break;
-          turnPage(state.activeOptions.turnMethod);
+          const turnOptions = { ...state.activeOptions };
+          let sampler = createPageSampler(startUrl);
+          // The saved screen crop already provides the exact pre-turn pixels;
+          // another Chrome screenshot would add a rate-limited wait here.
+          let baseline = sampler.kind === "screen" && captured.fingerprint?.length
+            ? { fingerprint: captured.fingerprint, layout: "screen" } : await sampler.read();
+          await waitWhilePopupOpen();
+          if (state.stopped) break;
+          assertCapturePage(startUrl);
+          if (await closeReaderMenu(startUrl)) {
+            await waitForStablePage({ startUrl });
+            sampler = createPageSampler(startUrl);
+            baseline = await sampler.read();
+          }
+          if (state.stopped) break;
+          const startedAt = performance.now();
+          turnPage(turnOptions.turnMethod);
           showPanel(`已保存 ${i} 张，等待翻页…`);
-          await waitUnlessStopped(state.activeOptions.delayMs);
+          const settled = await waitForStablePage({
+            startUrl, sampler, baseline,
+            screenBaseline: sampler.kind === "screen" ? baseline.fingerprint : captured.fingerprint, startedAt,
+            // End-of-chapter checks should follow this reader's observed turn
+            // time. Keep headroom for delayed turns and the screen confirmation.
+            noChangeTimeoutMs: recentTurnMs.length
+              ? Math.min(8000, Math.max(1200, Math.max(...recentTurnMs) * 2)) : 8000,
+            requireChange: turnOptions.turnMethod !== "none"
+          });
+          if (settled && !settled.changed) {
+            state.stopped = true;
+            terminalMessage = `未检测到翻页变化，已自动停止，共截取 ${state.completed} 张。`;
+          } else if (settled?.changed) {
+            settledFrame = settled.frame;
+            recentTurnMs.push(settled.settledMs);
+            if (recentTurnMs.length > 4) recentTurnMs.shift();
+          }
         }
       }
       if (!terminalMessage) terminalMessage = `已停止，共截取 ${state.completed} 张。`;
@@ -392,6 +742,7 @@
         showPanel(terminalMessage || "未产生截图。", false);
       }
       state.running = false;
+      state.waitStatus = "";
       state.activeOptions = null;
       setTimeout(() => {
         if (state.panel && !state.running) { state.panel.remove(); state.panel = null; }
@@ -418,10 +769,14 @@
       sendResponse({
         region: state.region,
         running: state.running,
+        waitStatus: state.waitStatus,
         completed: state.completed,
-        delayMs: state.activeOptions?.delayMs,
         turnMethod: state.activeOptions?.turnMethod
       });
+      return;
+    }
+    if (["start", "select-region", "auto-detect-region"].includes(message.action) && state.running) {
+      sendResponse({ ok: false, error: "已有任务正在运行，请先停止。" });
       return;
     }
     if (message.action === "select-region") { selectRegion(); sendResponse({ ok: true }); return; }
@@ -436,7 +791,6 @@
     if (message.action === "update-settings") {
       const methods = new Set(["click-left", "click-right", "key-left", "key-right", "none"]);
       if (state.running && state.activeOptions) {
-        state.activeOptions.delayMs = Math.max(100, Math.min(30000, Number(message.delayMs) || 500));
         if (methods.has(message.turnMethod)) state.activeOptions.turnMethod = message.turnMethod;
       }
       sendResponse({ ok: true, applied: state.running });

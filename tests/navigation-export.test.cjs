@@ -55,12 +55,20 @@ function createHarness({ failTab = false } = {}) {
       },
       onUpdated: { addListener(listener) { listeners.updated = listener; } },
       onRemoved: { addListener(listener) { listeners.removed = listener; } },
+      query: async () => [{ id: 7 }],
       captureVisibleTab: async () => 'data:image/png;base64,test'
     },
 
   };
   const source = fs.readFileSync(path.join(__dirname, '..', 'chrome-extension', 'background.js'), 'utf8');
-  vm.runInNewContext(source, { chrome, console, setTimeout: () => 0 });
+  let clock = 1000;
+  vm.runInNewContext(source, {
+    chrome, console, Date: { now: () => clock },
+    setTimeout(callback, ms) {
+      if (ms < 60000) { clock += ms; callback(); }
+      return 0;
+    }
+  });
 
   const sender = { tab: { id: 7, active: true, windowId: 1 } };
   const message = (action, payload = {}, source = sender) => new Promise((resolve) => {

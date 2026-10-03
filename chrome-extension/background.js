@@ -2,6 +2,28 @@ const pendingCaptures = new Map();
 const finalizingSessions = new Map();
 const sessionKey = (tabId) => `vmc-capture-${tabId}`;
 let creatingOffscreen = null;
+let captureQueue = Promise.resolve();
+let lastCaptureAt = 0;
+const sampledScreens = new Map();
+
+async function assertForegroundTab(tab) {
+  const [active] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+  if (active?.id !== tab.id) throw new Error("网页标签页不在前台。");
+}
+
+// Chrome limits captureVisibleTab to two calls per second. All consumers share
+// this queue, including region detection, stability probes and saved captures.
+function captureVisibleRegion(tab) {
+  const task = captureQueue.catch(() => {}).then(async () => {
+    const remaining = 550 - (Date.now() - lastCaptureAt);
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+    await assertForegroundTab(tab);
+    lastCaptureAt = Date.now();
+    return chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  });
+  captureQueue = task;
+  return task;
+}
 
 async function activeSession(tabId) {
   const key = sessionKey(tabId);
@@ -32,6 +54,7 @@ async function ensureOffscreen() {
 }
 
 async function exportSession(tabId, sessionId, requestedName) {
+  sampledScreens.delete(tabId);
   if (finalizingSessions.has(sessionId)) return finalizingSessions.get(sessionId);
   const task = (async () => {
     await pendingCaptures.get(tabId)?.catch(() => {});
@@ -79,11 +102,13 @@ async function finishNavigatingTab(tabId) {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading" || changeInfo.url) {
+    sampledScreens.delete(tabId);
     finishNavigatingTab(tabId).catch((error) => console.error("无法在页面跳转后导出 ZIP", error));
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  sampledScreens.delete(tabId);
   finishNavigatingTab(tabId).catch((error) => console.error("无法在标签页关闭后导出 ZIP", error));
 });
 
@@ -98,7 +123,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const actions = new Set([
     "complete-saved-export",
     "begin-capture-session", "capture-and-store", "export-capture-session",
-    "discard-capture-session", "trim-black-borders"
+    "discard-capture-session", "trim-black-borders", "sample-region"
   ]);
   if (!actions.has(message.action)) return;
   (async () => {
@@ -119,6 +144,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     await ensureOffscreen();
     if (message.action === "begin-capture-session") {
+      sampledScreens.delete(sender.tab?.id);
       const begun = await chrome.runtime.sendMessage({
         target: "offscreen", action: "begin", sessionId: message.sessionId
       });
@@ -134,6 +160,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return begun;
     }
     if (message.action === "discard-capture-session") {
+      sampledScreens.delete(sender.tab?.id);
       const discarded = await chrome.runtime.sendMessage({
         target: "offscreen", action: "discard", sessionId: message.sessionId
       });
@@ -148,7 +175,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return exportSession(sender.tab.id, message.sessionId, message.zipName);
     }
     if (!sender.tab?.id || !sender.tab.active) throw new Error("网页标签页不在前台。");
-    const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: "png" });
+    const cropKey = JSON.stringify([message.region, message.viewport]);
+    const sampled = sampledScreens.get(sender.tab.id);
+    const reuse = message.action === "capture-and-store" && message.sampleId &&
+      sampled?.sampleId === message.sampleId && sampled.cropKey === cropKey &&
+      Date.now() - sampled.at <= 2000;
+    let dataUrl;
+    if (reuse) {
+      // The last unchanged probe is already a full-resolution Chrome PNG.
+      // Save that confirmed frame without another rate-limited screenshot.
+      await assertForegroundTab(sender.tab);
+      dataUrl = sampled.dataUrl;
+      sampledScreens.delete(sender.tab.id);
+    } else {
+      dataUrl = await captureVisibleRegion(sender.tab);
+    }
+    if (message.action === "sample-region") {
+      const result = await chrome.runtime.sendMessage({
+        target: "offscreen", action: "sample-region", dataUrl,
+        region: message.region, viewport: message.viewport
+      });
+      if (!result?.ok) return result;
+      const sampleId = crypto.randomUUID();
+      sampledScreens.set(sender.tab.id, { sampleId, cropKey, dataUrl, at: Date.now() });
+      return { ...result, sampleId };
+    }
     if (message.action === "trim-black-borders") {
       return chrome.runtime.sendMessage({
         target: "offscreen",
@@ -166,6 +217,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         region: message.region,
         viewport: message.viewport,
         sessionId: message.sessionId,
+        deferEncoding: true,
         filename: `page_${String(message.index).padStart(3, "0")}.png`
       });
       if (!stored?.ok) throw new Error(stored?.error || "截图暂存失败");

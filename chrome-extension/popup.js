@@ -8,17 +8,14 @@ function safeName(value, fallback = "漫画截图") {
 }
 
 function captureSettings() {
-  const delaySeconds = Math.max(0.1, Math.min(30, Number($("delay").value) || 0.5));
-  return { delaySeconds, turnMethod: $("turnMethod").value };
+  return { turnMethod: $("turnMethod").value };
 }
 
 async function saveCaptureSettings(applyToRunningTask = false) {
   const settings = captureSettings();
-  $("delay").value = String(settings.delaySeconds);
   await chrome.storage.local.set(settings);
   if (applyToRunningTask) {
     const result = await send("update-settings", {
-      delayMs: settings.delaySeconds * 1000,
       turnMethod: settings.turnMethod
     });
     if (result?.applied) show("设置已保存，将从下一次翻页开始生效。");
@@ -59,13 +56,15 @@ async function refresh() {
     $("region").textContent = state.region
       ? `已框选 ${Math.round(state.region.width)} × ${Math.round(state.region.height)} 像素`
       : "尚未框选";
-    $("start").disabled = !state.region || state.running;
-    $("stop").disabled = !state.running;
+    const busy = state.running;
+    $("start").disabled = !state.region || busy;
+    $("stop").disabled = !busy;
+    $("detect").disabled = busy;
+    $("select").disabled = busy;
     $("apply").disabled = !state.running;
     if (state.running) {
-      if (Number.isFinite(state.delayMs)) $("delay").value = String(state.delayMs / 1000);
       if (state.turnMethod) $("turnMethod").value = state.turnMethod;
-      show(`任务进行中：已截取 ${state.completed} 张`);
+      show(`任务进行中：已截取 ${state.completed} 张。${state.waitStatus || ""}`);
     }
   } catch (error) {
     show(error.message, true);
@@ -98,10 +97,10 @@ $("detect").addEventListener("click", async () => {
 $("start").addEventListener("click", async () => {
   try {
     const settings = await saveCaptureSettings();
-    const delayMs = settings.delaySeconds * 1000;
     const folder = safeName($("folder").value);
     $("folder").value = folder;
-    await send("start", { delayMs, turnMethod: settings.turnMethod, folder });
+    const result = await send("start", { turnMethod: settings.turnMethod, folder });
+    if (!result?.ok) throw new Error(result?.error || "无法开始截图。");
     show("已开始。请保持此网页标签页在最前面。");
     window.close();
   } catch (error) {
@@ -129,10 +128,8 @@ $("apply").addEventListener("click", async () => {
 });
 
 async function initialize() {
-  const stored = await chrome.storage.local.get({ delaySeconds: 0.5, turnMethod: "click-left" });
-  const delaySeconds = Math.max(0.1, Math.min(30, Number(stored.delaySeconds) || 0.5));
+  const stored = await chrome.storage.local.get({ turnMethod: "click-left" });
   const allowedMethods = new Set(["click-left", "click-right", "key-left", "key-right", "none"]);
-  $("delay").value = String(delaySeconds);
   $("turnMethod").value = allowedMethods.has(stored.turnMethod) ? stored.turnMethod : "click-left";
   try {
     const tab = await activeTab();
@@ -147,10 +144,6 @@ async function initialize() {
 
 $("folder").addEventListener("blur", () => {
   $("folder").value = safeName($("folder").value);
-});
-
-$("delay").addEventListener("change", () => {
-  saveCaptureSettings(false).catch((error) => show(error.message, true));
 });
 
 $("turnMethod").addEventListener("change", () => {

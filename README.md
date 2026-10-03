@@ -9,7 +9,12 @@ A Chrome extension for batch-capturing a selected visible manga region and expor
 - Capture only the visible selected region.
 - Turn pages by clicking either side of the viewer or sending arrow keys.
 - Continue until manually stopped, the page URL changes, or the captured page stops changing. Small animation and rendering differences are ignored when detecting an unchanged page. A full-page navigation still exports the screenshots already captured.
-- Choose the page-turn wait time from `0.1` to `30` seconds in `0.1`-second steps.
+- Automatically check stability after every page turn and capture as soon as the page settles. No separate timing test or fixed wait needs configuration. Read only already-rendered canvases and images in the selected visible region at 40 ms intervals, including readers that compose a page from multiple image tiles, monitoring pixels, loading, position, transforms and opacity. A short 120 ms quiet interval confirms the final frame. If no suitable readable surface is available, use Chrome screenshots at least 550 ms apart and one additional unchanged sample. No image URLs or reader data APIs are used.
+- Complete portrait pages use fast detection even with an empty second-page slot reserved for later spreads. Clipped pages and missing tiles still block capture. Screenshot-based detection reuses the saved page as its pre-turn baseline to avoid an extra screenshot before clicking.
+- If a newly visible cross-origin image makes fast pixel sampling unreadable during a turn, switch to Chrome screenshots and compare with the saved pre-turn screenshot. Keep waiting for the final page to settle rather than abandoning it when the detection source changes.
+- Save the last confirmed screen sample without another screenshot when its tab, crop and viewport still match. Once a captured frame has been cropped and stored, turn the next page while PNG encoding finishes; ZIP export waits for all encoding to complete. This removes additional saving work after stability confirmation without adding a fixed page delay.
+- On Yanmaga, dismiss the reader's toolbar and dimming layer before the first capture, then confirm the unobscured frame. A toolbar dismissal is separate from a page-turn click.
+- Covered preloads, broken images and animations that do not change the visible page do not block capture; substantial unloaded images on top still do. After successful turns, an unchanged stable page stops using twice the slowest settling time of the last four turns, with a 1.2-second minimum and an 8-second maximum. With no turn history, allow 8 seconds. Continuous movement times out after 30 seconds and exports saved screenshots. Progress explains the waiting reason. Settings saved by older versions cannot disable stability checking or add a fixed delay.
 - Use the current page title as the default ZIP filename.
 - Save ZIP files directly with the File System Access API, without the downloads permission or filename listeners. This removes the shared download-renaming path that conflicts with IDM.
 - Keep screenshots in memory and open a save page when the task stops. Click Save ZIP to choose the destination with the page title prefilled. Cancelling or a write failure keeps the export available for retry.
@@ -26,7 +31,7 @@ A Chrome extension for batch-capturing a selected visible manga region and expor
 1. Open a manga page that you are authorized to access.
 2. Click the extension icon.
 3. Choose `自动识别区域` or `手动框选`.
-4. Set the page-turn wait time, page-turn method, and ZIP filename.
+4. Set the page-turn method and ZIP filename. Each page is automatically checked for stability before capture.
 5. Click `开始批量截图`.
 6. Keep the target tab active. Use the floating `停止` button when finished.
 7. In the save page, click `保存 ZIP` and choose a location. Existing files require the system save dialog's overwrite confirmation; names are no longer automatically numbered by the downloads API.

@@ -35,3 +35,24 @@ test('left and right clicks land one pixel inside the selected region edges', ()
   assert.equal(events.length, 10);
   assert.deepEqual(events.map((event) => event.clientX), [251, 251, 251, 251, 251, 1249, 1249, 1249, 1249, 1249]);
 });
+
+test('arrow keys reach a document listener exactly once through bubbling', () => {
+  const events = [];
+  const document = {
+    dispatchEvent(event) { events.push(event); },
+    activeElement: { dispatchEvent(event) { if (event.bubbles) document.dispatchEvent(event); } }
+  };
+  const source = fs.readFileSync(path.join(__dirname, '..', 'chrome-extension', 'content.js'), 'utf8')
+    .replace(/\}\)\(\);\s*$/, 'globalThis.turnPageForTest = turnPage; })();');
+  const context = {
+    window: {}, document,
+    chrome: { runtime: { onConnect: { addListener() {} }, onMessage: { addListener() {} } } },
+    sessionStorage: { getItem() { return null; } },
+    KeyboardEvent: class { constructor(type, init) { Object.assign(this, { type }, init); } }
+  };
+  vm.runInNewContext(source, context);
+  context.turnPageForTest('key-left');
+  assert.deepEqual(events.map(({ type, key }) => [type, key]), [
+    ['keydown', 'ArrowLeft'], ['keyup', 'ArrowLeft']
+  ]);
+});
