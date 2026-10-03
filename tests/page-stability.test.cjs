@@ -91,6 +91,122 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
 
 const waitOptions = { startUrl: 'https://test/manga', baseline: fingerprint(10), requireChange: true };
 
+function installEndDialog(h, { shown = () => h.turns() >= 2, comicVisible = () => !shown(), hidden = false,
+  active = true, hostname = 'yanmaga.jp' } = {}) {
+  const rect = (visible) => ({ left: visible ? 0 : 600, top: 0,
+    right: visible ? 500 : 1100, bottom: 500, width: 500, height: 500 });
+  const popup = { classList: { contains: value => value === 'rental' || value === 'active' && active },
+    getBoundingClientRect: () => rect(shown()) };
+  const frame = { tagName: 'IFRAME', closest: () => popup };
+  const comic = { id: 'content-p8', getBoundingClientRect: () => rect(comicVisible()) };
+  const content = { classList: { contains: value => value === 'pages' }, children: [comic] };
+  h.context.location.hostname = hostname;
+  h.context.document.getElementById = id => ({ 'wrap-popup': popup, rentalEpisodeFrame: frame, content })[id];
+  h.context.getComputedStyle = element => ({ display: hidden && element === popup ? 'none' : 'block',
+    visibility: 'visible', opacity: '1' });
+  return { popup, frame, content };
+}
+
+test('an end dialog with alternating toolbar backgrounds stops before storing it or clicking again', async () => {
+  const h = harness({ reusableSamples: true,
+    frame: (_time, _probe, turns) => fingerprint(turns === 0 ? 10 : turns === 1 ? 100 : turns % 2 ? 150 : 230) });
+  installEndDialog(h);
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  const lastProbe = h.messages.filter(message => message.action === 'sample-region').at(-1);
+  assert.equal(captures.length, 2, 'save both comic frames including the final one');
+  assert.equal(h.api.state.completed, 2);
+  assert.equal(h.turns(), 2, 'never click the terminal screen again');
+  assert.equal(h.now(), captures[1].at, 'the already visible end dialog adds no detection wait');
+  assert.ok(lastProbe.at <= captures[1].at, 'do not take probes of the end dialog');
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+  assert.match(h.label.textContent, /阅读结束页面/);
+});
+
+test('a visible end dialog at the start creates no screenshots and discards the empty task', async () => {
+  const h = harness();
+  installEndDialog(h, { shown: () => true, comicVisible: () => false });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.turns(), 0);
+  assert.equal(h.messages.some(message => ['sample-region', 'capture-and-store'].includes(message.action)), false);
+  assert.equal(h.messages.filter(message => message.action === 'discard-capture-session').length, 1);
+});
+
+test('a hidden or inactive dialog and a dialog beside visible comic cannot trigger the end stop', async () => {
+  for (const options of [{ hidden: true }, { active: false }, { comicVisible: () => true }, { hostname: 'other.test' }]) {
+    const h = harness();
+    installEndDialog(h, { shown: () => true, comicVisible: () => false, ...options });
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.changed, true);
+    assert.equal(result.finished, undefined);
+    assert.ok(h.messages.some(message => message.action === 'sample-region'));
+  }
+});
+
+test('an end dialog appearing during a probe wait is detected without taking its screenshot', async () => {
+  const h = harness();
+  installEndDialog(h, { shown: () => h.now() >= 100, comicVisible: () => h.now() < 100 });
+  const result = await h.api.waitForStablePage(waitOptions);
+  assert.equal(result.finished, true);
+  assert.equal(h.messages.length, 0);
+});
+
+function installComiciEnd(h, { shown = () => h.turns() >= 2, comicVisible = () => !shown(),
+  emptyVisible = true, hiddenFirst = true, missingButtons = false, inactive = false } = {}) {
+  const rect = (visible) => ({ left: visible ? 0 : -1000, top: 0,
+    right: visible ? 500 : -500, bottom: 500, width: 500, height: 500 });
+  const classes = (...names) => ({ contains: name => names.includes(name) });
+  const end = { classList: classes('mode-last'), getBoundingClientRect: () => rect(shown()) };
+  const comic = { classList: classes(), getBoundingClientRect: () => rect(comicVisible()) };
+  const empty = { classList: classes('mode-empty'), getBoundingClientRect: () => rect(emptyVisible) };
+  const viewer = { classList: { contains: name => name === 'mode-last-page' && shown() && !inactive },
+    querySelectorAll: () => [end, comic, empty] };
+  end.closest = selector => selector === '#comici-viewer' ? viewer : null;
+  end.querySelector = () => missingButtons ? null : { parentElement: end, getBoundingClientRect: end.getBoundingClientRect };
+  const hidden = { ...end, getBoundingClientRect: () => rect(false) };
+  const originalQuery = h.context.document.querySelectorAll;
+  h.context.document.querySelectorAll = selector => selector === '[id="xCVLastPage"]'
+    ? [...(hiddenFirst ? [hidden] : []), end] : originalQuery(selector);
+  h.context.location.hostname = 'kimicomi.com';
+  return { end, comic, viewer };
+}
+
+test('KimiComi HTML end card stops before a retained fast sampler can wait forever for comic coverage', async () => {
+  const h = harness({ localCanvas: true,
+    frame: (_time, _probe, turns) => fingerprint(turns === 0 ? 10 : 150) });
+  installComiciEnd(h);
+  // The reader has no raster surface on its HTML end card. The existing fast
+  // sampler would otherwise mark that missing coverage as loading forever.
+  h.canvas.getBoundingClientRect = () => ({ left: h.turns() >= 2 ? -1000 : 0, top: 0,
+    right: h.turns() >= 2 ? -500 : 500, bottom: 500, width: 500, height: 500 });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 2);
+  assert.equal(h.api.state.completed, 2);
+  assert.equal(h.turns(), 2, 'do not click into the next episode');
+  assert.equal(h.now(), captures[1].at, 'do not wait for end-card image coverage');
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+  assert.match(h.label.textContent, /阅读结束页面/);
+});
+
+test('KimiComi hidden viewers and an empty half do not conceal the visible end card', async () => {
+  const h = harness({ busy: () => true });
+  installComiciEnd(h, { shown: () => true, comicVisible: () => false });
+  const result = await h.api.waitForStablePage(waitOptions);
+  assert.equal(result.finished, true);
+  assert.equal(h.messages.length, 0, 'do not probe or wait for non-comic images');
+});
+
+test('KimiComi never stops at an unloaded comic beside the end card or a hidden/incomplete end card', async () => {
+  for (const options of [{ comicVisible: () => true }, { shown: () => false }, { inactive: true }, { missingButtons: true }]) {
+    const h = harness();
+    installComiciEnd(h, { shown: () => true, comicVisible: () => false, ...options });
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.finished, undefined);
+    assert.equal(result.changed, true);
+  }
+});
+
 test('automatic mode returns when the page settles without honoring an old fixed delay', async () => {
   const h = harness({ frame: (time) => fingerprint(time < 3300 ? Math.floor(time / 100) : 150) });
   const result = await h.api.waitForStablePage({ ...waitOptions, minimumMs: 6000 });

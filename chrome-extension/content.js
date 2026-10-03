@@ -351,6 +351,32 @@
     return false;
   }
 
+  function readerHasFinished() {
+    if (location.hostname === "kimicomi.com") {
+      // Multiple episode viewers can remain in the DOM. Check each visible
+      // terminal card, never the first matching hidden viewer or a footer link.
+      return [...document.querySelectorAll('[id="xCVLastPage"]')].some(end => {
+        const viewer = end.closest?.("#comici-viewer");
+        const favorite = end.querySelector("#xCVLastPageFavBtn");
+        const top = end.querySelector("#xCVLastPageTopBtn");
+        if (!viewer?.classList?.contains("mode-last-page") || !intersectsRegion(end) ||
+            !favorite || !top || !intersectsRegion(favorite) || !intersectsRegion(top)) return false;
+        return ![...viewer.querySelectorAll(".-cv-page")].some(page =>
+          !page.classList.contains("mode-last") && !page.classList.contains("mode-empty") && intersectsRegion(page));
+      });
+    }
+    if (location.hostname !== "yanmaga.jp") return false;
+    const popup = document.getElementById("wrap-popup");
+    const frame = document.getElementById("rentalEpisodeFrame");
+    const content = document.getElementById("content");
+    if (!popup?.classList?.contains("rental") || !popup.classList.contains("active") ||
+        !frame || frame.tagName !== "IFRAME" || frame.closest?.("#wrap-popup") !== popup ||
+        !content?.classList?.contains("pages") || !intersectsRegion(popup)) return false;
+    // This is the reader's end dialog, rather than a manga page. Read only
+    // its visible DOM; never close it, alter the toolbar or inspect the iframe.
+    return ![...content.children].some(element => /^content-p\d+$/.test(element.id) && intersectsRegion(element));
+  }
+
   function clickAt(target, x, y) {
     const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window, button: 0 };
     target.dispatchEvent(new PointerEvent("pointerdown", init));
@@ -523,11 +549,15 @@
         stableSince = null;
         anchor = null;
       }
+      if (state.stopped) return null;
+      assertCapturePage(startUrl);
+      if (readerHasFinished()) return { changed: false, finished: true };
       const waitStart = performance.now();
       const waited = await waitUnlessStopped(sampler.intervalMs);
       pausedMs += Math.max(0, performance.now() - waitStart - waited);
       if (state.stopped) return null;
       assertCapturePage(startUrl);
+      if (readerHasFinished()) return { changed: false, finished: true };
       let frame;
       try {
         frame = await sampler.read();
@@ -555,6 +585,7 @@
         anchor = null;
         continue;
       }
+      if (readerHasFinished()) return { changed: false, finished: true };
       changed = !requireChange || Boolean(baselineFrame && !sameFrame(baselineFrame, frame));
       if (requireChange && !baselineFrame) {
         throw new Error("翻页中途检测方式发生变化，请停止任务后重新开始截图。");
@@ -618,6 +649,10 @@
     const sessionId = crypto.randomUUID();
     const recentTurnMs = [];
     let terminalMessage = "";
+    const finishAtReaderEnd = () => {
+      state.stopped = true;
+      terminalMessage = `检测到阅读结束页面，已自动停止，共截取 ${state.completed} 张。`;
+    };
     showPanel("准备截图…");
     remove("vmc-detect-preview");
     try {
@@ -626,7 +661,9 @@
       });
       if (!begin?.ok) throw new Error(begin?.error || "无法创建临时截图任务。");
       await waitWhilePopupOpen();
-      let settledFrame = (await waitForStablePage({ startUrl }))?.frame;
+      const initial = await waitForStablePage({ startUrl });
+      if (initial?.finished) finishAtReaderEnd();
+      let settledFrame = initial?.frame;
       for (let i = 1; !state.stopped; i++) {
         await waitWhilePopupOpen();
         if (state.stopped) break;
@@ -635,6 +672,7 @@
           throw new Error("网页页码或地址发生变化，任务已停止。");
         }
         if (state.stopped) break;
+        if (readerHasFinished()) { finishAtReaderEnd(); break; }
         showPanel(`正在保存第 ${i} 张…`);
         const captured = await capture(sessionId, i, settledFrame?.sampleId);
         settledFrame = null;
@@ -657,6 +695,7 @@
           if (state.stopped) break;
           assertCapturePage(startUrl);
           if (state.stopped) break;
+          if (readerHasFinished()) { finishAtReaderEnd(); break; }
           const startedAt = performance.now();
           turnPage(turnOptions.turnMethod);
           showPanel(`已保存 ${i} 张，等待翻页…`);
@@ -669,7 +708,9 @@
               ? Math.min(8000, Math.max(1200, Math.max(...recentTurnMs) * 2)) : 8000,
             requireChange: turnOptions.turnMethod !== "none"
           });
-          if (settled && !settled.changed) {
+          if (settled?.finished) {
+            finishAtReaderEnd();
+          } else if (settled && !settled.changed) {
             state.stopped = true;
             terminalMessage = `未检测到翻页变化，已自动停止，共截取 ${state.completed} 张。`;
           } else if (settled?.changed) {
