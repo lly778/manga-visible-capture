@@ -351,15 +351,6 @@
     return false;
   }
 
-  function visibleReaderMenu() {
-    // This reader exposes its toolbar and dimming layer as regular DOM UI.
-    // Closing that layer must happen before a capture or a page-turn click.
-    if (location.hostname !== "yanmaga.jp") return null;
-    const menu = document.getElementById("menu");
-    const backdrop = document.getElementById("menu_transparent");
-    return menu && backdrop && intersectsRegion(backdrop) ? backdrop : null;
-  }
-
   function clickAt(target, x, y) {
     const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window, button: 0 };
     target.dispatchEvent(new PointerEvent("pointerdown", init));
@@ -367,26 +358,6 @@
     target.dispatchEvent(new PointerEvent("pointerup", init));
     target.dispatchEvent(new MouseEvent("mouseup", init));
     target.dispatchEvent(new MouseEvent("click", init));
-  }
-
-  async function closeReaderMenu(startUrl) {
-    if (state.stopped) return false;
-    const backdrop = visibleReaderMenu();
-    if (!backdrop) return false;
-    assertCapturePage(startUrl);
-    showPanel("正在收起阅读器工具栏和遮罩…");
-    const rect = backdrop.getBoundingClientRect();
-    clickAt(backdrop, (Math.max(0, rect.left) + Math.min(innerWidth, rect.right)) / 2,
-      (Math.max(0, rect.top) + Math.min(innerHeight, rect.bottom)) / 2);
-    let waited = 0;
-    while (visibleReaderMenu() && !state.stopped && waited < 1200) {
-      waited += await waitUnlessStopped(40);
-      assertCapturePage(startUrl);
-    }
-    if (visibleReaderMenu() && !state.stopped) {
-      throw new Error("阅读器工具栏未收起，请点击漫画中央关闭工具栏后重新开始。");
-    }
-    return true;
   }
 
   // Compare against the first frame in the stable interval to catch slow drift.
@@ -552,10 +523,6 @@
         stableSince = null;
         anchor = null;
       }
-      if (await closeReaderMenu(startUrl)) {
-        anchor = null;
-        stableSince = null;
-      }
       const waitStart = performance.now();
       const waited = await waitUnlessStopped(sampler.intervalMs);
       pausedMs += Math.max(0, performance.now() - waitStart - waited);
@@ -592,7 +559,7 @@
       if (requireChange && !baselineFrame) {
         throw new Error("翻页中途检测方式发生变化，请停止任务后重新开始截图。");
       }
-      const loading = frame.loading || regionIsBusy() || visibleReaderMenu();
+      const loading = frame.loading || regionIsBusy();
       if (loading || !sameFrame(anchor, frame)) {
         anchor = frame;
         stableSince = loading ? null : elapsed;
@@ -659,7 +626,6 @@
       });
       if (!begin?.ok) throw new Error(begin?.error || "无法创建临时截图任务。");
       await waitWhilePopupOpen();
-      await closeReaderMenu(startUrl);
       let settledFrame = (await waitForStablePage({ startUrl }))?.frame;
       for (let i = 1; !state.stopped; i++) {
         await waitWhilePopupOpen();
@@ -668,7 +634,6 @@
         if (location.href !== startUrl) {
           throw new Error("网页页码或地址发生变化，任务已停止。");
         }
-        if (await closeReaderMenu(startUrl)) settledFrame = (await waitForStablePage({ startUrl }))?.frame;
         if (state.stopped) break;
         showPanel(`正在保存第 ${i} 张…`);
         const captured = await capture(sessionId, i, settledFrame?.sampleId);
@@ -691,11 +656,6 @@
           await waitWhilePopupOpen();
           if (state.stopped) break;
           assertCapturePage(startUrl);
-          if (await closeReaderMenu(startUrl)) {
-            await waitForStablePage({ startUrl });
-            sampler = createPageSampler(startUrl);
-            baseline = await sampler.read();
-          }
           if (state.stopped) break;
           const startedAt = performance.now();
           turnPage(turnOptions.turnMethod);

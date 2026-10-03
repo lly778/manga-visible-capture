@@ -91,25 +91,6 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
 
 const waitOptions = { startUrl: 'https://test/manga', baseline: fingerprint(10), requireChange: true };
 
-function installReaderMenu(h, { closeDelay = 0, refuses = false } = {}) {
-  let closedAt = Infinity;
-  let clicks = 0;
-  const open = () => h.now() < closedAt;
-  const menu = {};
-  const backdrop = { parentElement: menu,
-    getBoundingClientRect: () => ({ left: 0, top: 0, right: open() ? 500 : 0,
-      bottom: open() ? 500 : 0, width: open() ? 500 : 0, height: open() ? 500 : 0 }),
-    dispatchEvent(event) {
-      if (event.type === 'click') { clicks++; if (!refuses) closedAt = h.now() + closeDelay; }
-    }
-  };
-  h.context.location.hostname = 'yanmaga.jp';
-  h.context.document.getElementById = (id) => id === 'menu' ? menu : id === 'menu_transparent' ? backdrop : null;
-  h.context.getComputedStyle = (element) => ({ display: element === menu && !open() ? 'none' : 'block',
-    visibility: 'visible', opacity: '1' });
-  return { open, clicks: () => clicks };
-}
-
 test('automatic mode returns when the page settles without honoring an old fixed delay', async () => {
   const h = harness({ frame: (time) => fingerprint(time < 3300 ? Math.floor(time / 100) : 150) });
   const result = await h.api.waitForStablePage({ ...waitOptions, minimumMs: 6000 });
@@ -361,33 +342,6 @@ test('the first two portrait pages are as fast as later spreads in a reserved do
   assert.equal(captures[0].at, 160);
   for (let i = 1; i < captures.length; i++) assert.equal(captures[i].at - captures[i - 1].at, 440);
   assert.equal(h.messages.filter((message) => message.action === 'sample-region').length, 0);
-});
-
-test('first-page reader controls close before capture and do not consume the first page-turn click', async () => {
-  const h = harness({ localImages: true, frame: (_time, _probe, turns) => fingerprint(turns ? 150 : 10) });
-  const menu = installReaderMenu(h, { closeDelay: 80 });
-  const originalSend = h.context.chrome.runtime.sendMessage;
-  h.context.chrome.runtime.sendMessage = async (message) => {
-    if (message.action === 'capture-and-store') assert.equal(menu.open(), false, 'never save the dimmed toolbar frame');
-    return originalSend(message);
-  };
-  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
-  const captures = h.messages.filter((message) => message.action === 'capture-and-store');
-  assert.equal(captures.length, 2);
-  assert.equal(captures[0].at, 240, 'wait only for the menu dismissal and actual stable frame');
-  assert.equal(menu.clicks(), 1);
-  assert.equal(h.turns(), 2, 'the menu dismissal is separate from both page-turn attempts');
-  assert.equal(h.messages.filter((message) => message.action === 'sample-region').length, 0);
-});
-
-test('a reader that refuses to dismiss its toolbar never stores the covered first page', async () => {
-  const h = harness({ localImages: true });
-  installReaderMenu(h, { refuses: true });
-  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
-  assert.equal(h.messages.filter((message) => message.action === 'capture-and-store').length, 0);
-  assert.equal(h.turns(), 0);
-  assert.match(h.label.textContent, /工具栏未收起/);
-  assert.equal(h.messages.filter((message) => message.action === 'discard-capture-session').length, 1);
 });
 
 test('a portrait page clipped during a slide cannot settle as a complete single page', async () => {
