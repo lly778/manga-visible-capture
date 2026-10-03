@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const fingerprint = (value) => Array(4096).fill(value);
 
-function harness({ frame = () => fingerprint(150), busy = () => false, onSample = () => {}, onTimer = () => {},
+function harness({ frame = () => fingerprint(150), busy = () => false, onSample = () => {}, onScreenSample = () => {}, onTimer = () => {},
   localCanvas = false, localImages = false, tainted = false, clickWorkMs = 0, reusableSamples = false } = {}) {
   let clock = 0;
   let probes = 0;
@@ -55,6 +55,7 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
           if (message.action === 'sample-region') {
             probes++;
             onSample(clock, context);
+            onScreenSample(clock, context);
             return { ok: true, fingerprint: frame(clock, probes, turns, turnedAt),
               ...(reusableSamples ? { sampleId: `sample-${probes}` } : {}) };
           }
@@ -545,6 +546,76 @@ test('switching to screen detection at an unchanged last page cannot store a dup
   assert.equal(h.messages.filter((message) => message.action === 'capture-and-store').length, 1);
   assert.equal(h.api.state.completed, 1);
   assert.match(h.label.textContent, /未检测到翻页变化/);
+});
+
+test('an unreadable advertisement stays slow but the immediately following ordinary pages recover fast confirmation', async () => {
+  const h = harness({ localCanvas: true, reusableSamples: true, tainted: (_time, turns) => !turns,
+    frame(time, _probe, turns, turnedAt) {
+      return fingerprint(turns > 0 && turns < 3 && time - turnedAt < 300
+        ? 30 + Math.floor((time - turnedAt) / 10) : 10 + Math.min(turns, 2) * 70);
+    } });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 3);
+  assert.equal(captures[0].at, 1100, 'the unreadable advertising page still needs slow confirmation');
+  assert.equal(captures[1].at - captures[0].at, 440, 'the next page uses ordinary fast confirmation');
+  assert.equal(captures[2].at - captures[1].at, 440);
+  const verification = h.messages.filter(message => message.action === 'sample-region' &&
+    message.at > captures[0].at && message.at <= captures[1].at);
+  assert.equal(verification.length, 1, 'one screen sample verifies the change after fast stability');
+  assert.match(captures[1].sampleId, /^sample-\d+$/, 'reuse the verified sample');
+  assert.equal(captures[1].at, verification[0].at, 'no further screenshot wait after verification');
+});
+
+test('readability recovery without a page change cannot save a duplicate or stop before the no-change deadline', async () => {
+  const h = harness({ localCanvas: true, tainted: (_time, turns) => !turns, frame: () => fingerprint(10) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 1);
+  assert.ok(h.now() - captures[0].at >= 8000, 'a new readable surface alone does not prove a page turn');
+  assert.match(h.label.textContent, /未检测到翻页变化/);
+});
+
+test('screen recovery cannot accept a moving readable page just because two screenshots look unchanged', async () => {
+  const h = harness({ localCanvas: true, tainted: (_time, turns) => !turns,
+    frame: (_time, _probe, turns) => fingerprint(turns ? 150 : 10) });
+  h.context.getComputedStyle = element => ({ display: 'block', visibility: 'visible', opacity: '1',
+    transform: element === h.canvas && h.turns() === 1 && h.now() < 2400 ? `translateX(${2400 - h.now()}px)` : 'none' });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 2);
+  assert.ok(captures[1].at >= 2520, 'wait for 1300 ms of movement and fast stability confirmation');
+});
+
+test('a recovered page changing while its verification screenshot is taken must be confirmed again', async () => {
+  let moved = false;
+  const h = harness({ localCanvas: true, reusableSamples: true, tainted: (_time, turns) => !turns,
+    frame: (_time, _probe, turns) => fingerprint(turns ? 150 : 10),
+    onScreenSample(_time, context) {
+      if (h.turns() && !moved) {
+        moved = true;
+        context.getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1', transform: 'translateX(1px)' });
+      }
+    } });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 2);
+  assert.equal(captures[1].at - captures[0].at, 320);
+  const verification = h.messages.filter(message => message.action === 'sample-region' &&
+    message.at > captures[0].at && message.at <= captures[1].at);
+  assert.equal(verification.length, 2, 'discard the first sample and take a new one after confirming stability again');
+  assert.equal(captures[1].at, verification[1].at);
+  assert.match(captures[1].sampleId, /^sample-\d+$/);
+});
+
+test('fast recovery after an advertisement still waits for the ordinary image to finish loading', async () => {
+  const h = harness({ localImages: true, tainted: (_time, turns) => !turns,
+    busy: time => h.turns() === 1 && time < 1700,
+    frame: (_time, _probe, turns) => fingerprint(turns ? 150 : 10) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  const captures = h.messages.filter(message => message.action === 'capture-and-store');
+  assert.equal(captures.length, 2);
+  assert.ok(captures[1].at >= 1820, 'load the second page and confirm its final pixels before capturing');
 });
 
 test('a fast reader stops promptly at the final unchanged page using earlier turn timing', async () => {

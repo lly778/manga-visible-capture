@@ -535,6 +535,11 @@
     let anchor = baselineFrame;
     let stableSince = null;
     let changed = !requireChange;
+    let nextScreenProbeMs = 550;
+    let recoverySampler = null;
+    let recoveryAnchor = null;
+    let recoverySince = null;
+    let verifiedRecovery = null;
     const timeoutMs = 30000;
     const progress = (text) => {
       state.waitStatus = text;
@@ -548,16 +553,45 @@
         pausedMs += performance.now() - pauseStart;
         stableSince = null;
         anchor = null;
+        recoveryAnchor = null;
+        recoverySince = null;
       }
       if (state.stopped) return null;
       assertCapturePage(startUrl);
       if (readerHasFinished()) return { changed: false, finished: true };
       const waitStart = performance.now();
-      const waited = await waitUnlessStopped(sampler.intervalMs);
+      // Keep screenshot probes rate-limited, but retry readable page pixels
+      // between them. An advertisement on the old page must not lock the new
+      // ordinary page into screenshot-based stability confirmation.
+      const interval = sampler.kind === "screen"
+        ? Math.min(40, Math.max(1, nextScreenProbeMs - elapsed)) : sampler.intervalMs;
+      const waited = await waitUnlessStopped(interval);
       pausedMs += Math.max(0, performance.now() - waitStart - waited);
       if (state.stopped) return null;
       assertCapturePage(startUrl);
       if (readerHasFinished()) return { changed: false, finished: true };
+      elapsed = performance.now() - startedAt - pausedMs;
+      let recoveryFrame = null;
+      let recoveryStable = false;
+      if (sampler.kind === "screen") {
+        try {
+          recoverySampler ||= createRenderedSampler();
+          recoveryFrame = recoverySampler?.read();
+        } catch {
+          recoverySampler = null;
+        }
+        if (!recoveryFrame || recoveryFrame.loading || regionIsBusy()) {
+          recoveryAnchor = null;
+          recoverySince = null;
+        } else if (!sameFrame(recoveryAnchor, recoveryFrame)) {
+          recoveryAnchor = recoveryFrame;
+          recoverySince = elapsed;
+        } else {
+          recoveryStable = elapsed - recoverySince >= recoverySampler.quietMs;
+        }
+        const needsVerification = recoveryStable && !sameFrame(verifiedRecovery, recoveryFrame);
+        if (elapsed < nextScreenProbeMs && !needsVerification) continue;
+      }
       let frame;
       try {
         frame = await sampler.read();
@@ -586,6 +620,28 @@
         continue;
       }
       if (readerHasFinished()) return { changed: false, finished: true };
+      if (sampler.kind === "screen") {
+        nextScreenProbeMs = elapsed + sampler.intervalMs;
+        // The raw fingerprint cannot be compared to a screenshot baseline.
+        // Verify the actual change with one screenshot, and retain that exact
+        // sample for saving only if the readable page stayed stable around it.
+        if (recoveryStable) {
+          let after;
+          try { after = recoverySampler.read(); } catch { recoverySampler = null; }
+          if (!after?.loading && !regionIsBusy() && sameFrame(recoveryAnchor, after)) {
+            verifiedRecovery = after;
+            if (!requireChange || baselineFrame && !sameFrame(baselineFrame, frame)) {
+              state.waitStatus = "";
+              return { elapsedMs: Math.ceil(elapsed), settledMs: Math.ceil(recoverySince),
+                frame, fingerprint: frame.fingerprint, changed: true };
+            }
+          } else {
+            recoveryAnchor = null;
+            recoverySince = null;
+            recoveryStable = false;
+          }
+        }
+      }
       changed = !requireChange || Boolean(baselineFrame && !sameFrame(baselineFrame, frame));
       if (requireChange && !baselineFrame) {
         throw new Error("翻页中途检测方式发生变化，请停止任务后重新开始截图。");
@@ -597,7 +653,8 @@
       } else if (stableSince === null) {
         stableSince = elapsed;
       }
-      const stable = stableSince !== null && elapsed - stableSince >= sampler.quietMs;
+      const stable = stableSince !== null && elapsed - stableSince >= sampler.quietMs &&
+        (!recoverySampler || recoveryStable);
       if (changed && stable) {
         state.waitStatus = "";
         return { elapsedMs: Math.ceil(elapsed), settledMs: Math.ceil(stableSince),
