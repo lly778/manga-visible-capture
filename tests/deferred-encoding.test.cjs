@@ -76,3 +76,31 @@ test('an encoding failure is reported instead of exporting a ZIP that silently o
   assert.equal(exported.ok, false);
   assert.match(exported.error, /PNG encoding failed/);
 });
+
+test('a crop stored while export awaits an earlier encoding is also awaited', async () => {
+  const h = harness();
+  const encoding = [];
+  let frame = 0;
+  h.context.cropToBytes = async () => {
+    const index = ++frame;
+    return { fingerprint: new Uint8Array(4096).fill(index * 100),
+      encode: () => new Promise(resolve => encoding.push(() => resolve(new Uint8Array([index])))) };
+  };
+  await h.send('begin');
+  await h.send('crop-store', { filename: 'page_001.png' });
+  let finished = false;
+  const exporting = h.send('prepare-export').then(result => { finished = true; return result; });
+  await new Promise(setImmediate);
+  await h.send('crop-store', { filename: 'page_002.png' });
+  encoding[0]();
+  await new Promise(setImmediate);
+  assert.equal(finished, false, 'the later crop must finish encoding before ZIP generation');
+  encoding[1]();
+  const exported = await exporting;
+  assert.equal(exported.ok, true);
+  assert.equal(exported.count, 2);
+  const zip = Buffer.from(await (await fetch(exported.url)).arrayBuffer());
+  assert.ok(zip.includes(Buffer.from('page_001.png')));
+  assert.ok(zip.includes(Buffer.from('page_002.png')));
+  URL.revokeObjectURL(exported.url);
+});

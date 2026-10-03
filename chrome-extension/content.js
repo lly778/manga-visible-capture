@@ -332,6 +332,28 @@
   }
 
   function regionIsBusy() {
+    // A loading placeholder can itself be a fully loaded image. Look for
+    // visible, substantial loading layers as well as unfinished page images.
+    // This also covers a loader drawn over an already complete canvas.
+    const selector = "[aria-busy='true'],[role='progressbar'],[class*='loading' i],[id*='loading' i],[class*='loader' i],[id*='loader' i]";
+    for (const element of document.querySelectorAll(selector)) {
+      const identity = `${element.id || ""} ${element.getAttribute?.("class") || element.className || ""}`;
+      if (!/loading|loader/i.test(identity) && element.getAttribute?.("aria-busy") !== "true" &&
+          element.getAttribute?.("role") !== "progressbar") continue;
+      if (!intersectsRegion(element)) continue;
+      const rect = element.getBoundingClientRect();
+      const left = Math.max(rect.left, state.region.left);
+      const top = Math.max(rect.top, state.region.top);
+      const right = Math.min(rect.right, state.region.left + state.region.width);
+      const bottom = Math.min(rect.bottom, state.region.top + state.region.height);
+      if ((right - left) * (bottom - top) < state.region.width * state.region.height * 0.15) continue;
+      for (const fx of [0.25, 0.5, 0.75]) {
+        for (const fy of [0.25, 0.5, 0.75]) {
+          const hit = document.elementFromPoint(left + (right - left) * fx, top + (bottom - top) * fy);
+          if (hit === element || element.contains?.(hit)) return true;
+        }
+      }
+    }
     for (const image of document.querySelectorAll("img")) {
       // Preload layers may have the same bounds as the canvas displaying the
       // page. Only a substantial image actually on top can block capture.
@@ -689,9 +711,12 @@
     if (method.startsWith("key-")) {
       const key = method === "key-left" ? "ArrowLeft" : "ArrowRight";
       const code = key;
+      const keyCode = method === "key-left" ? 37 : 39;
       const target = document.activeElement || document.body;
       for (const type of ["keydown", "keyup"]) {
-        target.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
+        target.dispatchEvent(new KeyboardEvent(type, {
+          key, code, keyCode, which: keyCode, bubbles: true, cancelable: true
+        }));
       }
       return;
     }

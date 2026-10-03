@@ -55,4 +55,5 @@ test('arrow keys reach a document listener exactly once through bubbling', () =>
   assert.deepEqual(events.map(({ type, key }) => [type, key]), [
     ['keydown', 'ArrowLeft'], ['keyup', 'ArrowLeft']
   ]);
+  assert.deepEqual(events.map(({ keyCode, which }) => [keyCode, which]), [[37, 37], [37, 37]]);
 });

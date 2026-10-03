@@ -166,6 +166,71 @@ test('visible unloaded images delay capture even while pixels are unchanged', as
   assert.ok(result.elapsedMs >= 6050);
 });
 
+function addLoadingPlaceholder(h, { visible = () => true, covered = false,
+  rect = { left: 0, top: 0, right: 500, bottom: 500, width: 500, height: 500 } } = {}) {
+  // The reader uses a complete loadingImage inside a visible loading layer,
+  // and hides that layer when the actual canvas is ready.
+  const layer = { tagName: 'DIV', className: 'loading', getBoundingClientRect: () => rect };
+  const placeholder = { tagName: 'IMG', className: 'loadingImage', parentElement: layer,
+    complete: true, naturalWidth: 500, naturalHeight: 500, getBoundingClientRect: () => rect };
+  layer.contains = element => element === placeholder;
+  const query = h.context.document.querySelectorAll;
+  h.context.document.querySelectorAll = selector => selector.includes('[aria-busy')
+    ? [layer, placeholder] : query(selector);
+  const style = h.context.getComputedStyle;
+  h.context.getComputedStyle = element => ({ ...style(element),
+    ...(element === layer ? { visibility: visible(h.now()) ? 'visible' : 'hidden' } : {}) });
+  const hit = h.context.document.elementFromPoint;
+  h.context.document.elementFromPoint = (x, y) => !covered && visible(h.now()) &&
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+    ? placeholder : hit(x, y);
+  return { layer, placeholder };
+}
+
+for (const fast of [false, true]) {
+  test(`${fast ? 'fast' : 'screen'} detection waits for a stationary complete loading placeholder`, async () => {
+    const h = harness({ localCanvas: fast });
+    addLoadingPlaceholder(h, { visible: time => time < 2400 });
+    assert.equal(h.api.regionIsBusy(), true);
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.changed, true);
+    assert.ok(result.settledMs >= 2400, 'quiet time must begin after the loader disappears');
+    assert.ok(result.elapsedMs < 3500, 'there is no extra fixed wait after loading');
+  });
+}
+
+test('a loading placeholder on only one half still blocks the whole spread', async () => {
+  const h = harness({ localCanvas: true });
+  addLoadingPlaceholder(h, { visible: time => time < 600,
+    rect: { left: 250, top: 0, right: 500, bottom: 500, width: 250, height: 500 } });
+  assert.equal(h.api.regionIsBusy(), true);
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.ok(result.settledMs >= 600);
+});
+
+test('hidden, covered, out-of-crop and tiny loading layers do not block a ready page', async () => {
+  for (const options of [
+    { visible: () => false }, { covered: true },
+    { rect: { left: 700, top: 0, right: 1200, bottom: 500, width: 500, height: 500 } },
+    { rect: { left: 100, top: 100, right: 120, bottom: 120, width: 20, height: 20 } }
+  ]) {
+    const h = harness({ localCanvas: true });
+    addLoadingPlaceholder(h, options);
+    assert.equal(h.api.regionIsBusy(), false);
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.elapsedMs, 160, 'a ready page retains its normal fast timing');
+  }
+});
+
+test('a persistent loading placeholder times out without storing it as a page', async () => {
+  const h = harness({ localCanvas: true });
+  addLoadingPlaceholder(h);
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.messages.some(message => message.action === 'capture-and-store'), false);
+  assert.equal(h.turns(), 0);
+  assert.match(h.label.textContent, /未加载的图片/);
+});
+
 test('a running animation that does not change the visible page cannot block capture', async () => {
   const h = harness();
   const target = h.context.document.querySelectorAll()[0];

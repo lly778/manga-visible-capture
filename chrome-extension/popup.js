@@ -128,9 +128,15 @@ $("apply").addEventListener("click", async () => {
 });
 
 async function initialize() {
-  const stored = await chrome.storage.local.get({ turnMethod: "click-left" });
+  const stored = await chrome.storage.local.get({ turnMethod: "key-left", arrowKeyDefaultApplied: false });
   const allowedMethods = new Set(["click-left", "click-right", "key-left", "key-right", "none"]);
-  $("turnMethod").value = allowedMethods.has(stored.turnMethod) ? stored.turnMethod : "click-left";
+  let turnMethod = allowedMethods.has(stored.turnMethod) ? stored.turnMethod : "key-left";
+  if (!stored.arrowKeyDefaultApplied) {
+    if (turnMethod === "click-left") turnMethod = "key-left";
+    if (turnMethod === "click-right") turnMethod = "key-right";
+    await chrome.storage.local.set({ turnMethod, arrowKeyDefaultApplied: true });
+  }
+  $("turnMethod").value = turnMethod;
   try {
     const tab = await activeTab();
     await ensureContent(tab.id);

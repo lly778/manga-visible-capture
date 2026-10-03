@@ -126,7 +126,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     "discard-capture-session", "trim-black-borders", "sample-region"
   ]);
   if (!actions.has(message.action)) return;
-  (async () => {
+  const captureTabId = message.action === "capture-and-store" ? sender.tab?.id : null;
+  const previousCapture = pendingCaptures.get(captureTabId);
+  const alreadyFinalizing = captureTabId != null && finalizingSessions.has(message.sessionId);
+  // Register the entire capture before the first await, including screenshot
+  // acquisition. Navigation and stop must not export or discard it midway.
+  const task = Promise.resolve().then(async () => {
+    if (alreadyFinalizing) throw new Error("截图任务正在导出，请重新开始。");
+    await previousCapture?.catch(() => {});
     if (message.action === "complete-saved-export") {
       if (sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL("save.html")) {
         throw new Error("请从 ZIP 保存页完成保存。");
@@ -209,32 +216,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         viewport: message.viewport
       });
     }
-    const captureTask = (async () => {
-      const stored = await chrome.runtime.sendMessage({
-        target: "offscreen",
-        action: "crop-store",
-        dataUrl,
-        region: message.region,
-        viewport: message.viewport,
-        sessionId: message.sessionId,
-        deferEncoding: true,
-        filename: `page_${String(message.index).padStart(3, "0")}.png`
+    const stored = await chrome.runtime.sendMessage({
+      target: "offscreen",
+      action: "crop-store",
+      dataUrl,
+      region: message.region,
+      viewport: message.viewport,
+      sessionId: message.sessionId,
+      deferEncoding: true,
+      filename: `page_${String(message.index).padStart(3, "0")}.png`
+    });
+    if (!stored?.ok) throw new Error(stored?.error || "截图暂存失败");
+    const session = await activeSession(sender.tab.id);
+    if (session?.sessionId === message.sessionId) {
+      await chrome.storage.session.set({
+        [sessionKey(sender.tab.id)]: { ...session, completed: stored.count }
       });
-      if (!stored?.ok) throw new Error(stored?.error || "截图暂存失败");
-      const session = await activeSession(sender.tab.id);
-      if (session?.sessionId === message.sessionId) {
-        await chrome.storage.session.set({
-          [sessionKey(sender.tab.id)]: { ...session, completed: stored.count }
-        });
-      }
-      return stored;
-    })();
-    pendingCaptures.set(sender.tab.id, captureTask);
-    try {
-      return await captureTask;
-    } finally {
-      if (pendingCaptures.get(sender.tab.id) === captureTask) pendingCaptures.delete(sender.tab.id);
     }
-  })().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
+    return stored;
+  });
+  if (captureTabId != null && !alreadyFinalizing) {
+    pendingCaptures.set(captureTabId, task);
+    const clearCapture = () => {
+      if (pendingCaptures.get(captureTabId) === task) pendingCaptures.delete(captureTabId);
+    };
+    task.then(clearCapture, clearCapture);
+  }
+  task.then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
   return true;
 });

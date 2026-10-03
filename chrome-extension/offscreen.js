@@ -314,7 +314,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === "prepare-export") {
       const files = sessions.get(message.sessionId);
       if (!files?.length) throw new Error("没有可以打包的截图。");
-      await Promise.all(files.map((file) => file.encoding));
+      // A navigation export can overlap an in-flight crop. Walk the live
+      // list so crops appended while encoding is awaited are included too.
+      for (let i = 0; i < files.length; i++) await files[i].encoding;
       const blob = makeZip(files);
       const url = URL.createObjectURL(blob);
       return { ok: true, url, count: files.length, size: blob.size };
