@@ -4,7 +4,7 @@ A Chrome extension for batch-capturing a selected visible manga region and expor
 
 ## Features
 
-- Automatically detect a likely manga viewer region or select one manually. When a full-page image sits inside a taller viewer container, use the image's top and bottom edges rather than including surrounding page content.
+- Automatically detect a likely manga viewer region or select one manually. When a full-page image sits inside a taller viewer container, use the image's top and bottom edges rather than including surrounding page content. Merge stacked image strips into complete page bounds to exclude outer viewer margins from double-page captures, including white margins, while preserving the artwork's own white edges and first-page blank slots.
 - Trim broad black or dark-gray margins from automatically detected regions. If the first page occupies only the left half of a two-page viewer, reserve an equally wide blank slot on the right so later two-page captures fit. Small cuts at either outer page edge are corrected by the same rule; manual selection is unchanged.
 - Capture only the visible selected region.
 - Turn pages with arrow keys by default, or manually select clicks on either side of the viewer. Existing click settings switch once to the corresponding arrow key on upgrade; subsequent manual choices remain saved. All sites use the selected method, without site-specific page-turn overrides. Keyboard events also include legacy key codes.

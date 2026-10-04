@@ -140,6 +140,67 @@
       best.region = { ...outer, top: imageTop, height: imageBottom - imageTop };
     }
 
+    // A page may be several horizontal image strips. Merge their DOM bounds
+    // before measuring the spread; white viewer gutters cannot be inferred
+    // safely from pixels because the artwork itself can have white margins.
+    const columns = [];
+    for (const element of candidates) {
+      if (!/^(IMG|CANVAS)$/.test(element.tagName)) continue;
+      let inside = element === best.element;
+      let visible = true;
+      for (let parent = element; parent && parent !== document.body; parent = parent.parentElement) {
+        if (parent === best.element) inside = true;
+        const style = getComputedStyle(parent);
+        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) < 0.08) {
+          visible = false;
+          break;
+        }
+      }
+      if (!inside || !visible) continue;
+      const raw = element.getBoundingClientRect();
+      const image = clampRect(raw);
+      const right = image.left + image.width;
+      const bottom = image.top + image.height;
+      if (image.width < 180 || image.width < outer.width * 0.15 ||
+          image.height < outer.height * 0.08 || image.width < raw.width * 0.98 ||
+          image.left < outer.left - 8 || right > outer.left + outer.width + 8 ||
+          image.top < outer.top - 8 || bottom > outerBottom + 8) continue;
+      let column = columns.find(item => Math.abs(item.left - image.left) <= 4 &&
+        Math.abs(item.right - right) <= 4);
+      if (!column) {
+        column = { left: image.left, right, strips: [] };
+        columns.push(column);
+      }
+      column.strips.push([image.top, bottom]);
+    }
+    const pages = columns.filter(column => {
+      column.strips.sort((a, b) => a[0] - b[0]);
+      column.top = column.strips[0][0];
+      column.bottom = column.top;
+      let covered = 0;
+      for (const [top, bottom] of column.strips) {
+        covered += Math.max(0, bottom - Math.max(top, column.bottom));
+        column.bottom = Math.max(column.bottom, bottom);
+      }
+      const height = column.bottom - column.top;
+      const aspect = (column.right - column.left) / height;
+      return height >= outer.height * 0.75 && covered >= height * 0.95 &&
+        aspect >= 0.4 && aspect <= 2.2;
+    }).sort((a, b) => a.left - b.left);
+    const singleSpread = pages.length === 1 &&
+      (pages[0].right - pages[0].left) / (pages[0].bottom - pages[0].top) >= 1.05;
+    const doubleSpread = pages.length === 2 &&
+      Math.abs(pages[0].top - pages[1].top) <= 8 &&
+      Math.abs(pages[0].bottom - pages[1].bottom) <= 8 &&
+      Math.abs(pages[1].left - pages[0].right) <= Math.max(12, outer.height * 0.03);
+    if (singleSpread || doubleSpread) {
+      const left = pages[0].left;
+      const right = pages[pages.length - 1].right;
+      const top = Math.min(...pages.map(page => page.top));
+      const bottom = Math.max(...pages.map(page => page.bottom));
+      best.region = { left, top, width: right - left, height: bottom - top };
+    }
+
     const margin = 2;
     const region = {
       left: Math.max(0, Math.round(best.region.left - margin)),

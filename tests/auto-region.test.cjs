@@ -4,6 +4,79 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+async function detectTiledSpread({ singlePage = false, hiddenExtra = false, incomplete = false,
+  viewportWidth = 1280, viewportHeight = 720 } = {}) {
+  let listener;
+  const width = viewportHeight * 0.703125;
+  const start = (viewportWidth - width * 2) / 2;
+  const node = (tagName, className, left, top, width, height, parentElement = null, hidden = false) => ({
+    tagName, id: '', className, parentElement, hidden,
+    closest: () => null,
+    getBoundingClientRect: () => ({ left, top, width, height, right: left + width, bottom: top + height })
+  });
+  const viewer = node('DIV', 'pages viewer', 0, 0, viewportWidth, viewportHeight);
+  const surfaces = [];
+  for (const side of singlePage ? [0] : [0, 1]) {
+    const page = node('DIV', '', start + width * side, 0, width, viewportHeight, viewer);
+    const imageContainer = node('DIV', 'pt-img', start + width * side, 0, width, viewportHeight, page);
+    for (let tile = 0; tile < (incomplete ? 2 : 3); tile++) {
+      const top = viewportHeight * tile / 3;
+      const tileContainer = node('DIV', '', start + width * side, top, width + 0.74,
+        viewportHeight / 3 + 1.5, imageContainer);
+      surfaces.push(node('IMG', '', start + width * side, top, width + 0.74,
+        viewportHeight / 3 + 1.5, tileContainer));
+    }
+  }
+  if (hiddenExtra) {
+    const preload = node('DIV', '', 0, 0, width, viewportHeight, viewer, true);
+    surfaces.push(node('IMG', '', 0, 0, width, viewportHeight, preload));
+  }
+  const document = { body: {}, documentElement: { appendChild() {} },
+    querySelectorAll: () => surfaces, getElementById: () => null,
+    createElement: () => ({ style: {}, appendChild() {}, remove() {} }) };
+  const chrome = { runtime: { onConnect: { addListener() {} },
+    onMessage: { addListener(fn) { listener = fn; } },
+    async sendMessage(message) { return { ok: true, region: message.region }; } } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../chrome-extension/content.js'), 'utf8'), {
+    window: {}, document, chrome, sessionStorage: { getItem: () => null, setItem() {} },
+    getComputedStyle: element => ({ display: element.hidden ? 'none' : 'block',
+      visibility: 'visible', opacity: '1', position: 'static' }),
+    innerWidth: viewportWidth, innerHeight: viewportHeight, setTimeout: () => 0
+  });
+  return { result: await new Promise(resolve => listener({ action: 'auto-detect-region' }, {}, resolve)),
+    start, width };
+}
+
+for (const [viewportWidth, viewportHeight] of [[1280, 720], [1707, 898]]) {
+  test(`tiled double pages exclude white viewer margins at ${viewportWidth}x${viewportHeight}`, async () => {
+    const { result, start, width } = await detectTiledSpread({ viewportWidth, viewportHeight });
+    assert.equal(result.ok, true);
+    assert.ok(Math.abs(result.region.left - start) <= 3);
+    assert.ok(Math.abs(result.region.width - width * 2) <= 6, JSON.stringify(result.region));
+    assert.equal(result.region.top, 0);
+    assert.equal(result.region.height, viewportHeight);
+  });
+}
+
+test('hidden preload pages do not enlarge tiled double-page bounds', async () => {
+  const { result, start, width } = await detectTiledSpread({ hiddenExtra: true });
+  assert.ok(Math.abs(result.region.left - start) <= 3);
+  assert.ok(Math.abs(result.region.width - width * 2) <= 5);
+});
+
+test('a tiled first page retains its blank second-page slot', async () => {
+  const { result, width } = await detectTiledSpread({ singlePage: true });
+  assert.equal(result.ok, true);
+  assert.ok(result.region.width >= width * 2);
+});
+
+test('incomplete tiled pages do not narrow the viewer to partial artwork', async () => {
+  const { result } = await detectTiledSpread({ incomplete: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.region.left, 0);
+  assert.equal(result.region.width, 1280);
+});
+
 test('auto-detection prefers the visible portion of a tall page over an inner panel', async () => {
   let listener;
   let savedRegion;
