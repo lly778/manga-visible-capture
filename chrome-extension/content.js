@@ -397,9 +397,19 @@
     // visible, substantial loading layers as well as unfinished page images.
     // This also covers a loader drawn over an already complete canvas.
     const selector = "[aria-busy='true'],[role='progressbar'],[class*='loading' i],[id*='loading' i],[class*='loader' i],[id*='loader' i]";
-    for (const element of document.querySelectorAll(selector)) {
+    const pendingMounts = new Set();
+    // Some readers reserve the page's entire canvas container before inserting
+    // the canvas. One ready portrait must not hide this unfinished other half.
+    // Explicit empty page slots are intentional, including first-page padding.
+    for (const mount of document.querySelectorAll("[class*='page-canvas' i],[class*='page-image' i]")) {
+      if (/^(CANVAS|IMG|PICTURE|SVG)$/.test(mount.tagName) || !mount.querySelector ||
+          mount.querySelector("canvas,img,picture,svg") ||
+          mount.closest?.(".mode-empty,[data-empty='true']")) continue;
+      pendingMounts.add(mount);
+    }
+    for (const element of new Set([...document.querySelectorAll(selector), ...pendingMounts])) {
       const identity = `${element.id || ""} ${element.getAttribute?.("class") || element.className || ""}`;
-      if (!/loading|loader/i.test(identity) && element.getAttribute?.("aria-busy") !== "true" &&
+      if (!pendingMounts.has(element) && !/loading|loader/i.test(identity) && element.getAttribute?.("aria-busy") !== "true" &&
           element.getAttribute?.("role") !== "progressbar") continue;
       if (!intersectsRegion(element)) continue;
       const rect = element.getBoundingClientRect();
@@ -825,7 +835,7 @@
         // recovered fast confirmation uses a screen sample only to verify the
         // turn and must break the consecutive-slow sequence.
         consecutiveSlowPages = settledDetectionMode === "screen" ? consecutiveSlowPages + 1 : 0;
-        if (consecutiveSlowPages >= 2) {
+        if (consecutiveSlowPages >= 2 && state.activeOptions.ignoreConsecutiveSlowStop !== true) {
           state.stopped = true;
           terminalMessage = `连续两页使用慢检测，已自动停止，第二页未保存，共截取 ${state.completed} 张。`;
           break;
@@ -927,7 +937,8 @@
         running: state.running,
         waitStatus: state.waitStatus,
         completed: state.completed,
-        turnMethod: state.activeOptions?.turnMethod
+        turnMethod: state.activeOptions?.turnMethod,
+        ignoreConsecutiveSlowStop: state.activeOptions?.ignoreConsecutiveSlowStop === true
       });
       return;
     }
@@ -948,6 +959,9 @@
       const methods = new Set(["click-left", "click-right", "key-left", "key-right", "none"]);
       if (state.running && state.activeOptions) {
         if (methods.has(message.turnMethod)) state.activeOptions.turnMethod = message.turnMethod;
+        if (typeof message.ignoreConsecutiveSlowStop === "boolean") {
+          state.activeOptions.ignoreConsecutiveSlowStop = message.ignoreConsecutiveSlowStop;
+        }
       }
       sendResponse({ ok: true, applied: state.running });
       return;

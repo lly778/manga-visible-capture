@@ -8,17 +8,16 @@ function safeName(value, fallback = "漫画截图") {
 }
 
 function captureSettings() {
-  return { turnMethod: $("turnMethod").value };
+  return { turnMethod: $("turnMethod").value,
+    ignoreConsecutiveSlowStop: $("ignoreConsecutiveSlowStop").checked === true };
 }
 
 async function saveCaptureSettings(applyToRunningTask = false) {
   const settings = captureSettings();
   await chrome.storage.local.set(settings);
   if (applyToRunningTask) {
-    const result = await send("update-settings", {
-      turnMethod: settings.turnMethod
-    });
-    if (result?.applied) show("设置已保存，将从下一次翻页开始生效。");
+    const result = await send("update-settings", settings);
+    if (result?.applied) show("设置已应用，关闭弹窗后继续截图。");
   }
   return settings;
 }
@@ -64,6 +63,7 @@ async function refresh() {
     $("apply").disabled = !state.running;
     if (state.running) {
       if (state.turnMethod) $("turnMethod").value = state.turnMethod;
+      $("ignoreConsecutiveSlowStop").checked = state.ignoreConsecutiveSlowStop === true;
       show(`任务进行中：已截取 ${state.completed} 张。${state.waitStatus || ""}`);
     }
   } catch (error) {
@@ -99,7 +99,7 @@ $("start").addEventListener("click", async () => {
     const settings = await saveCaptureSettings();
     const folder = safeName($("folder").value);
     $("folder").value = folder;
-    const result = await send("start", { turnMethod: settings.turnMethod, folder });
+    const result = await send("start", { ...settings, folder });
     if (!result?.ok) throw new Error(result?.error || "无法开始截图。");
     show("已开始。请保持此网页标签页在最前面。");
     window.close();
@@ -128,7 +128,8 @@ $("apply").addEventListener("click", async () => {
 });
 
 async function initialize() {
-  const stored = await chrome.storage.local.get({ turnMethod: "key-left", arrowKeyDefaultApplied: false });
+  const stored = await chrome.storage.local.get({ turnMethod: "key-left", arrowKeyDefaultApplied: false,
+    ignoreConsecutiveSlowStop: false });
   const allowedMethods = new Set(["click-left", "click-right", "key-left", "key-right", "none"]);
   let turnMethod = allowedMethods.has(stored.turnMethod) ? stored.turnMethod : "key-left";
   if (!stored.arrowKeyDefaultApplied) {
@@ -137,6 +138,7 @@ async function initialize() {
     await chrome.storage.local.set({ turnMethod, arrowKeyDefaultApplied: true });
   }
   $("turnMethod").value = turnMethod;
+  $("ignoreConsecutiveSlowStop").checked = stored.ignoreConsecutiveSlowStop === true;
   try {
     const tab = await activeTab();
     await ensureContent(tab.id);
@@ -153,6 +155,10 @@ $("folder").addEventListener("blur", () => {
 });
 
 $("turnMethod").addEventListener("change", () => {
+  saveCaptureSettings(false).catch((error) => show(error.message, true));
+});
+
+$("ignoreConsecutiveSlowStop").addEventListener("change", () => {
   saveCaptureSettings(false).catch((error) => show(error.message, true));
 });
 

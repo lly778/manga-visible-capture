@@ -15,6 +15,7 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
   const messages = [];
   const saved = {};
   const label = {};
+  let messageListener;
   const panel = { style: {}, querySelector: (selector) => selector === '.vmc-label' ? label : { style: {} }, remove() {} };
   const image = {
     tagName: 'IMG', get complete() { return !busy(clock); }, naturalWidth: 100, naturalHeight: 100,
@@ -49,7 +50,7 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
     chrome: {
       storage: { local: { async set(value) { Object.assign(saved, value); } } },
       runtime: {
-        onConnect: { addListener() {} }, onMessage: { addListener() {} },
+        onConnect: { addListener() {} }, onMessage: { addListener(fn) { messageListener = fn; } },
         async sendMessage(message) {
           messages.push({ ...message, at: clock });
           if (message.action === 'sample-region') {
@@ -87,10 +88,66 @@ function harness({ frame = () => fingerprint(150), busy = () => false, onSample 
     .replace(/\}\)\(\);\s*$/, 'globalThis.api = { state, waitForStablePage, run, stableFingerprint, regionIsBusy, createPageSampler }; })();');
   vm.runInNewContext(source, context);
   context.api.state.panel = panel;
-  return { context, api: context.api, messages, saved, label, canvas, image, now: () => clock, turns: () => turns };
+  return { context, api: context.api, messages, saved, label, canvas, image, now: () => clock, turns: () => turns,
+    send: message => new Promise(resolve => messageListener(message, {}, resolve)) };
 }
 
 const waitOptions = { startUrl: 'https://test/manga', baseline: fingerprint(10), requireChange: true };
+
+function installPendingHalf(h, { readyAt = 600, intentionalBlank = false, hidden = false,
+  covered = false, outside = false } = {}) {
+  h.canvas.getBoundingClientRect = () => ({ left: 250, top: 0, right: 500, bottom: 500, width: 250, height: 500 });
+  const page = { className: intentionalBlank ? 'mode-empty -cv-page' : '-cv-page mode-loaded' };
+  const mount = { tagName: 'DIV', className: '-cv-page-canvas', parentElement: page,
+    closest: selector => selector.includes('.mode-empty') && intentionalBlank ? page : null,
+    querySelector: () => h.now() >= readyAt ? h.canvas : null,
+    contains: element => element === mount,
+    getBoundingClientRect: () => ({ left: outside ? 600 : 0, top: 0, right: outside ? 850 : 250,
+      bottom: 500, width: 250, height: 500 }) };
+  const originalQuery = h.context.document.querySelectorAll;
+  h.context.document.querySelectorAll = selector => selector.includes("page-canvas") ? [mount] : originalQuery(selector);
+  const originalHit = h.context.document.elementFromPoint;
+  h.context.document.elementFromPoint = (x, y) => x < 250 && !covered ? mount : originalHit(x, y);
+  h.context.getComputedStyle = element => ({ display: element === page && hidden ? 'none' : 'block',
+    visibility: 'visible', opacity: '1', transform: 'none' });
+  return mount;
+}
+
+for (const fast of [true, false]) {
+  test(`${fast ? 'fast' : 'screen'} capture waits for the empty page canvas mount in the other half`, async () => {
+    const h = harness({ localCanvas: fast });
+    const readyAt = fast ? 600 : 1800;
+    installPendingHalf(h, { readyAt });
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.ok(result.settledMs >= readyAt, `accepted an unfinished half at ${result.elapsedMs} ms`);
+    assert.ok(result.elapsedMs <= (fast ? 760 : 2750));
+  });
+}
+
+test('an intentional empty first-page slot does not block fast capture', async () => {
+  const h = harness({ localCanvas: true });
+  installPendingHalf(h, { intentionalBlank: true, readyAt: Infinity });
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.equal(result.elapsedMs, 160);
+  assert.equal(h.messages.length, 0);
+});
+
+test('hidden, covered and outside page mounts do not wait for preloaded pages', async () => {
+  for (const option of ['hidden', 'covered', 'outside']) {
+    const h = harness({ localCanvas: true });
+    installPendingHalf(h, { [option]: true, readyAt: Infinity });
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.elapsedMs, 160, option);
+  }
+});
+
+test('a permanently missing half page is never stored', async () => {
+  const h = harness({ localCanvas: true });
+  installPendingHalf(h, { readyAt: Infinity });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.messages.filter(message => message.action === 'capture-and-store').length, 0);
+  assert.match(h.label.textContent, /画面长时间未稳定/);
+});
 
 test('a Yanmaga end dialog uses ordinary stability detection without a site-specific stop', async () => {
   const h = harness();
@@ -296,6 +353,35 @@ test('a second consecutive slow page is fully checked but not saved', async () =
   assert.equal(h.turns(), 1, 'do not click past the second slow page');
   assert.match(h.label.textContent, /连续两页使用慢检测.*第二页未保存/);
   assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+});
+
+test('the override saves consecutive slow pages until ordinary unchanged-page detection stops', async () => {
+  const h = harness({ frame: (_time, _probe, turns) => fingerprint(10 + Math.min(turns, 3) * 40) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic', ignoreConsecutiveSlowStop: true });
+  assert.equal(h.messages.filter(message => message.action === 'capture-and-store').length, 4);
+  assert.match(h.label.textContent, /未检测到翻页变化/);
+  assert.doesNotMatch(h.label.textContent, /连续两页使用慢检测/);
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+});
+
+test('the override still stops an unstable page after the normal timeout', async () => {
+  const h = harness({ frame: (time, _probe, turns) => fingerprint(turns ? Math.floor(time / 100) % 200 : 10) });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic', ignoreConsecutiveSlowStop: true });
+  assert.equal(h.messages.filter(message => message.action === 'capture-and-store').length, 1);
+  assert.match(h.label.textContent, /画面长时间未稳定/);
+});
+
+test('running tasks accept boolean slow-stop settings and report their active value', async () => {
+  const h = harness();
+  h.api.state.running = true;
+  h.api.state.activeOptions = { turnMethod: 'click-left' };
+  assert.equal((await h.send({ action: 'get-state' })).ignoreConsecutiveSlowStop, false);
+  assert.equal((await h.send({ action: 'update-settings', ignoreConsecutiveSlowStop: true })).applied, true);
+  assert.equal((await h.send({ action: 'get-state' })).ignoreConsecutiveSlowStop, true);
+  await h.send({ action: 'update-settings', ignoreConsecutiveSlowStop: 'false' });
+  assert.equal((await h.send({ action: 'get-state' })).ignoreConsecutiveSlowStop, true);
+  await h.send({ action: 'update-settings', ignoreConsecutiveSlowStop: false });
+  assert.equal((await h.send({ action: 'get-state' })).ignoreConsecutiveSlowStop, false);
 });
 
 test('covered preload images cannot block a stable visible canvas', async () => {

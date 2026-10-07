@@ -12,6 +12,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .primary { background: #2563eb; color: white; margin-top: 6px; }
 .secondary { background: #e2e8f0; color: #0f172a; }
 .apply-settings { margin-top: 2px; }
+.checkbox-option { display: flex; align-items: center; gap: 8px; }
+.checkbox-option input { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: #2563eb; }
 .detect { background: #dbeafe; color: #1d4ed8; }
 .region-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .danger { margin-top: 8px; background: #fee2e2; color: #991b1b; }
