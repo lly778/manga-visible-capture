@@ -392,24 +392,46 @@
     return true;
   }
 
+  function loaderIsOnMissingPage(element, left, top, right, bottom) {
+    const region = state.region;
+    const x = (left + right) / 2;
+    const y = (top + bottom) / 2;
+    // A tiny spinner in the unused half is evidence of a pending page, not
+    // intentional first-page padding. Keep edge controls and indicators over
+    // existing artwork from delaying an otherwise complete page.
+    const half = x < region.left + region.width / 2 ? 0 : 1;
+    const withinHalf = (x - region.left - half * region.width / 2) / (region.width / 2);
+    if (right - left < 8 || bottom - top < 8 || withinHalf < 0.12 || withinHalf > 0.88 ||
+        y < region.top + region.height * 0.12 || y > region.top + region.height * 0.88) return false;
+    for (const surface of document.querySelectorAll("canvas,img")) {
+      if (surface === element || element.contains?.(surface) || !intersectsRegion(surface)) continue;
+      const isImage = surface.tagName === "IMG";
+      if (isImage ? !surface.complete || !surface.naturalWidth || !surface.naturalHeight : !surface.width || !surface.height) continue;
+      const rect = surface.getBoundingClientRect();
+      if (rect.width * rect.height < region.width * region.height * 0.01) continue;
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return false;
+    }
+    return true;
+  }
+
   function regionIsBusy() {
     // A loading placeholder can itself be a fully loaded image. Look for
     // visible, substantial loading layers as well as unfinished page images.
     // This also covers a loader drawn over an already complete canvas.
-    const selector = "[aria-busy='true'],[role='progressbar'],[class*='loading' i],[id*='loading' i],[class*='loader' i],[id*='loader' i]";
+    const selector = "[aria-busy='true'],[role='progressbar'],progress,[class*='loading' i],[id*='loading' i],[class*='loader' i],[id*='loader' i],[class*='spinner' i],[id*='spinner' i]";
     const pendingMounts = new Set();
     // Some readers reserve the page's entire canvas container before inserting
     // the canvas. One ready portrait must not hide this unfinished other half.
     // Explicit empty page slots are intentional, including first-page padding.
     for (const mount of document.querySelectorAll("[class*='page-canvas' i],[class*='page-image' i]")) {
       if (/^(CANVAS|IMG|PICTURE|SVG)$/.test(mount.tagName) || !mount.querySelector ||
-          mount.querySelector("canvas,img,picture,svg") ||
+          mount.querySelector("canvas,img") ||
           mount.closest?.(".mode-empty,[data-empty='true']")) continue;
       pendingMounts.add(mount);
     }
     for (const element of new Set([...document.querySelectorAll(selector), ...pendingMounts])) {
       const identity = `${element.id || ""} ${element.getAttribute?.("class") || element.className || ""}`;
-      if (!pendingMounts.has(element) && !/loading|loader/i.test(identity) && element.getAttribute?.("aria-busy") !== "true" &&
+      if (!pendingMounts.has(element) && !/loading|loader|spinner/i.test(identity) && element.tagName !== "PROGRESS" && element.getAttribute?.("aria-busy") !== "true" &&
           element.getAttribute?.("role") !== "progressbar") continue;
       if (!intersectsRegion(element)) continue;
       const rect = element.getBoundingClientRect();
@@ -417,7 +439,8 @@
       const top = Math.max(rect.top, state.region.top);
       const right = Math.min(rect.right, state.region.left + state.region.width);
       const bottom = Math.min(rect.bottom, state.region.top + state.region.height);
-      if ((right - left) * (bottom - top) < state.region.width * state.region.height * 0.15) continue;
+      if ((right - left) * (bottom - top) < state.region.width * state.region.height * 0.15 &&
+          !loaderIsOnMissingPage(element, left, top, right, bottom)) continue;
       for (const fx of [0.25, 0.5, 0.75]) {
         for (const fy of [0.25, 0.5, 0.75]) {
           const hit = document.elementFromPoint(left + (right - left) * fx, top + (bottom - top) * fy);

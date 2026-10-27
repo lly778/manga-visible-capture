@@ -149,6 +149,15 @@ test('a permanently missing half page is never stored', async () => {
   assert.match(h.label.textContent, /画面长时间未稳定/);
 });
 
+test('an SVG spinner inside a page canvas mount is not a finished raster page', async () => {
+  const h = harness({ localCanvas: true });
+  const mount = installPendingHalf(h);
+  const spinner = { tagName: 'SVG' };
+  mount.querySelector = selector => h.now() >= 600 ? h.canvas : selector.includes('svg') ? spinner : null;
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.ok(result.settledMs >= 600);
+});
+
 test('a Yanmaga end dialog uses ordinary stability detection without a site-specific stop', async () => {
   const h = harness();
   const popup = { classList: { contains: value => ['rental', 'active'].includes(value) },
@@ -243,6 +252,86 @@ function addLoadingPlaceholder(h, { visible = () => true, covered = false,
     ? placeholder : hit(x, y);
   return { layer, placeholder };
 }
+
+function installSmallHalfLoader(h, { readyAt = 1800, onLeft = true, hidden = false, covered = false,
+  identity = { className: 'spinner' }, afterTurn = false, overReadyPage = false, edge = false } = {}) {
+  const pageLeft = onLeft ? 250 : 0;
+  h.canvas.getBoundingClientRect = () => ({ left: pageLeft, top: 0, right: pageLeft + 250,
+    bottom: 500, width: 250, height: 500 });
+  const loaderLeft = (onLeft ? 0 : 250) + (edge ? 2 : 115);
+  const rect = { left: loaderLeft, top: 240, right: loaderLeft + 20, bottom: 260, width: 20, height: 20 };
+  const loader = { tagName: 'DIV', ...identity, getBoundingClientRect: () => rect };
+  const pending = { ...h.canvas, getBoundingClientRect: () => ({ left: onLeft ? 0 : 250, top: 0,
+    right: onLeft ? 250 : 500, bottom: 500, width: 250, height: 500 }) };
+  const active = () => (!afterTurn || h.turns() > 0) && h.now() < readyAt;
+  const rasters = () => overReadyPage || h.now() >= readyAt ? [h.canvas, pending] : [h.canvas];
+  h.context.document.querySelectorAll = selector => selector.includes('[aria-busy') ? [loader]
+    : selector === 'canvas,img' ? rasters() : [];
+  const originalHit = h.context.document.elementFromPoint;
+  h.context.document.elementFromPoint = (x, y) => {
+    if (active() && !covered && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom) return loader;
+    return rasters().find(surface => {
+      const box = surface.getBoundingClientRect();
+      return x >= box.left && x < box.right && y >= box.top && y < box.bottom;
+    }) || originalHit(x, y);
+  };
+  h.context.getComputedStyle = element => ({ display: 'block', opacity: '1', transform: 'none',
+    visibility: element === loader && (hidden || !active()) ? 'hidden' : 'visible' });
+  return loader;
+}
+
+for (const fast of [true, false]) {
+  for (const onLeft of [true, false]) {
+    test(`${fast ? 'fast' : 'screen'} detection waits for a small spinner in the ${onLeft ? 'left' : 'right'} empty half`, async () => {
+      const h = harness({ localCanvas: true, tainted: !fast });
+      installSmallHalfLoader(h, { onLeft });
+      assert.equal(h.api.regionIsBusy(), true);
+      const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+      assert.ok(result.settledMs >= 1800, `accepted the unfinished half at ${result.elapsedMs} ms`);
+      assert.ok(result.elapsedMs < 3000);
+    });
+  }
+}
+
+test('small loading, progress and accessible indicators also block an empty half', () => {
+  for (const identity of [
+    { className: 'page-loading' }, { id: 'pageLoader' }, { id: 'pageSpinner' }, { tagName: 'PROGRESS' },
+    { getAttribute: name => name === 'aria-busy' ? 'true' : null },
+    { getAttribute: name => name === 'role' ? 'progressbar' : null }
+  ]) {
+    const h = harness({ localCanvas: true });
+    installSmallHalfLoader(h, { identity });
+    assert.equal(h.api.regionIsBusy(), true, JSON.stringify(identity));
+  }
+});
+
+test('hidden, covered, edge and ready-page spinners do not turn blank padding into a pending page', async () => {
+  for (const options of [{ hidden: true }, { covered: true }, { edge: true }, { overReadyPage: true }]) {
+    const h = harness({ localCanvas: true });
+    installSmallHalfLoader(h, { ...options, readyAt: Infinity });
+    assert.equal(h.api.regionIsBusy(), false, JSON.stringify(options));
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.elapsedMs, 160);
+  }
+});
+
+test('a permanently loading half with a small spinner is never stored', async () => {
+  const h = harness({ localCanvas: true });
+  installSmallHalfLoader(h, { readyAt: Infinity });
+  await h.api.run({ turnMethod: 'key-left', folder: 'comic' });
+  assert.equal(h.messages.some(message => message.action === 'capture-and-store'), false);
+  assert.match(h.label.textContent, /画面长时间未稳定/);
+});
+
+test('a small spinner appearing after a turn exports only the already complete page', async () => {
+  const h = harness({ localCanvas: true });
+  installSmallHalfLoader(h, { readyAt: Infinity, afterTurn: true });
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.messages.filter(message => message.action === 'capture-and-store').length, 1);
+  assert.equal(h.messages.filter(message => message.action === 'export-capture-session').length, 1);
+  assert.equal(h.turns(), 1);
+  assert.match(h.label.textContent, /画面长时间未稳定/);
+});
 
 for (const fast of [false, true]) {
   test(`${fast ? 'fast' : 'screen'} detection waits for a stationary complete loading placeholder`, async () => {
