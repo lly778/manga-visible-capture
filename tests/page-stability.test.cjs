@@ -158,6 +158,68 @@ test('an SVG spinner inside a page canvas mount is not a finished raster page', 
   assert.ok(result.settledMs >= 600);
 });
 
+function installInvisibleHitLayer(h, target, { pointerless = true, opaqueCover = false, hiddenParent = false } = {}) {
+  const wrap = { contains: element => element === target, getBoundingClientRect: h.image.getBoundingClientRect };
+  const navParent = {};
+  const nav = { tagName: 'DIV', parentElement: navParent, getBoundingClientRect: wrap.getBoundingClientRect };
+  const cover = { tagName: 'DIV', getBoundingClientRect: wrap.getBoundingClientRect };
+  const originalHit = h.context.document.elementFromPoint;
+  h.context.document.elementsFromPoint = (x, y) => {
+    const rect = target.getBoundingClientRect();
+    if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return [originalHit(x, y)];
+    return [nav, ...(opaqueCover ? [cover] : []), ...(pointerless ? [] : [target]), wrap];
+  };
+  h.context.document.elementFromPoint = (x, y) => h.context.document.elementsFromPoint(x, y)[0];
+  const style = h.context.getComputedStyle;
+  h.context.getComputedStyle = element => ({ ...style(element),
+    ...(element === nav && !hiddenParent || element === navParent && hiddenParent ? { opacity: '0' } : {}),
+    ...(element === target && pointerless ? { pointerEvents: 'none' } : {}) });
+}
+
+for (const fast of [true, false]) {
+  for (const pointerless of [true, false]) {
+    test(`${fast ? 'fast' : 'screen'} detection waits for a pending half under an invisible hit layer (${pointerless ? 'pointerless' : 'hittable'})`, async () => {
+      const h = harness({ localCanvas: fast });
+      const mount = installPendingHalf(h, { readyAt: 1800 });
+      installInvisibleHitLayer(h, mount, { pointerless });
+      const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+      assert.ok(result.settledMs >= 1800, `accepted the unfinished half at ${result.elapsedMs} ms`);
+      assert.ok(result.elapsedMs < 3000);
+    });
+  }
+}
+
+test('an opaque cover still hides a pending half below an invisible hit layer', async () => {
+  const h = harness({ localCanvas: true });
+  const mount = installPendingHalf(h, { readyAt: Infinity });
+  installInvisibleHitLayer(h, mount, { opaqueCover: true });
+  assert.equal((await h.api.waitForStablePage({ startUrl: waitOptions.startUrl })).elapsedMs, 160);
+});
+
+test('an invisible parent of a hit layer does not hide a visible pending half', async () => {
+  const h = harness({ localCanvas: true });
+  const mount = installPendingHalf(h);
+  installInvisibleHitLayer(h, mount, { hiddenParent: true });
+  const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+  assert.ok(result.settledMs >= 600);
+});
+
+test('blank padding under an invisible navigation layer remains ready', async () => {
+  const h = harness({ localCanvas: true });
+  const mount = installPendingHalf(h, { readyAt: Infinity, intentionalBlank: true });
+  installInvisibleHitLayer(h, mount);
+  assert.equal((await h.api.waitForStablePage({ startUrl: waitOptions.startUrl })).elapsedMs, 160);
+});
+
+test('a permanently pending half below an invisible navigation layer is never stored', async () => {
+  const h = harness({ localCanvas: true });
+  const mount = installPendingHalf(h, { readyAt: Infinity });
+  installInvisibleHitLayer(h, mount);
+  await h.api.run({ turnMethod: 'click-left', folder: 'comic' });
+  assert.equal(h.messages.some(message => message.action === 'capture-and-store'), false);
+  assert.match(h.label.textContent, /画面长时间未稳定/);
+});
+
 test('a Yanmaga end dialog uses ordinary stability detection without a site-specific stop', async () => {
   const h = harness();
   const popup = { classList: { contains: value => ['rental', 'active'].includes(value) },
@@ -344,6 +406,17 @@ for (const fast of [false, true]) {
     assert.ok(result.elapsedMs < 3500, 'there is no extra fixed wait after loading');
   });
 }
+
+test('loaded placeholders and unfinished images stay busy below an invisible hit layer', async () => {
+  const placeholder = harness({ localCanvas: true });
+  const { layer } = addLoadingPlaceholder(placeholder, { visible: time => time < 1800 });
+  installInvisibleHitLayer(placeholder, layer);
+  assert.ok((await placeholder.api.waitForStablePage({ startUrl: waitOptions.startUrl })).settledMs >= 1800);
+
+  const image = harness({ busy: time => time < 1800 });
+  installInvisibleHitLayer(image, image.image);
+  assert.ok((await image.api.waitForStablePage(waitOptions)).settledMs >= 1800);
+});
 
 test('a loading placeholder on only one half still blocks the whole spread', async () => {
   const h = harness({ localCanvas: true });
@@ -645,6 +718,16 @@ test('a complete manga half beside visible HTML or SVG content uses slow detecti
     const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
     assert.equal(result.detectionMode, 'screen');
     assert.ok(h.messages.some(message => message.action === 'sample-region'));
+  }
+});
+
+test('an invisible navigation layer does not hide HTML in the other half from sampler selection', async () => {
+  for (const opaqueCover of [false, true]) {
+    const h = harness({ localCanvas: true });
+    const control = installMixedPortrait(h);
+    installInvisibleHitLayer(h, control, { opaqueCover });
+    const result = await h.api.waitForStablePage({ startUrl: waitOptions.startUrl });
+    assert.equal(result.detectionMode, opaqueCover ? 'rendered' : 'screen');
   }
 });
 

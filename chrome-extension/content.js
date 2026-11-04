@@ -414,6 +414,20 @@
     return true;
   }
 
+  function elementIsVisibleAtPoint(element, x, y) {
+    // Hit testing includes opacity:0 navigation layers and omits entire
+    // pointer-events:none page trees. Walk past invisible hits, accepting the
+    // page's hit-testable ancestor only if no visible sibling covers it.
+    const hits = document.elementsFromPoint?.(x, y) || [document.elementFromPoint(x, y)];
+    for (const hit of hits) {
+      if (!hit) continue;
+      if (hit === element || element.contains?.(hit)) return true;
+      if (!intersectsRegion(hit)) continue;
+      return Boolean(hit.contains?.(element));
+    }
+    return false;
+  }
+
   function regionIsBusy() {
     // A loading placeholder can itself be a fully loaded image. Look for
     // visible, substantial loading layers as well as unfinished page images.
@@ -443,8 +457,7 @@
           !loaderIsOnMissingPage(element, left, top, right, bottom)) continue;
       for (const fx of [0.25, 0.5, 0.75]) {
         for (const fy of [0.25, 0.5, 0.75]) {
-          const hit = document.elementFromPoint(left + (right - left) * fx, top + (bottom - top) * fy);
-          if (hit === element || element.contains?.(hit)) return true;
+          if (elementIsVisibleAtPoint(element, left + (right - left) * fx, top + (bottom - top) * fy)) return true;
         }
       }
     }
@@ -460,7 +473,7 @@
       if ((right - left) * (bottom - top) < state.region.width * state.region.height * 0.15) continue;
       for (const fx of [0.25, 0.5, 0.75]) {
         for (const fy of [0.25, 0.5, 0.75]) {
-          if (document.elementFromPoint(left + (right - left) * fx, top + (bottom - top) * fy) === image) return true;
+          if (elementIsVisibleAtPoint(image, left + (right - left) * fx, top + (bottom - top) * fy)) return true;
         }
       }
     }
@@ -535,8 +548,7 @@
       const x = (left + right) / 2;
       const y = (top + bottom) / 2;
       if (columns.some(column => x >= column.left && x <= column.right && y >= column.top && y <= column.bottom)) continue;
-      const hit = document.elementFromPoint(x, y);
-      if (hit === element || element.contains?.(hit)) return true;
+      if (elementIsVisibleAtPoint(element, x, y)) return true;
     }
     return false;
   }
