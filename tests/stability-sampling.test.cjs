@@ -52,6 +52,13 @@ test('a stale sender marked active cannot capture another tab', async () => {
   assert.equal(h.forwarded.length, 0);
 });
 
+test('region detection forwards the composited page geometry with the screen sample', async () => {
+  const h = backgroundHarness();
+  const pageHint = { aspect: 1409 / 2000, count: 2 };
+  await h.send('trim-black-borders', { pageHint });
+  assert.deepEqual(h.forwarded[0].pageHint, pageHint);
+});
+
 test('saving the confirmed screen probe does not queue another Chrome screenshot', async () => {
   const h = backgroundHarness();
   const sample = await h.send('sample-region');

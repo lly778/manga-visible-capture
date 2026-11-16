@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 async function detectCompositedCanvas({ left = 260, top = 0, width = 1188, height = 842,
   viewportWidth = 1707, viewportHeight = 842, opaqueOutside = false, sparse = false,
-  tainted = false, empty = false } = {}) {
+  tainted = false, empty = false, bookWalker = false, zoomed = false } = {}) {
   let listener;
   const messages = [];
   const viewer = { tagName: 'DIV', id: 'viewer', className: 'viewer', parentElement: null,
@@ -14,7 +14,8 @@ async function detectCompositedCanvas({ left = 260, top = 0, width = 1188, heigh
     getBoundingClientRect: () => ({ left: 0, top: 0, right: viewportWidth, bottom: viewportHeight,
       width: viewportWidth, height: viewportHeight }) };
   const canvas = { ...viewer, tagName: 'CANVAS', id: '', className: '', parentElement: viewer,
-    width: Math.round(viewportWidth * 1.5), height: Math.round(viewportHeight * 1.5) };
+    width: Math.round(viewportWidth * 1.5), height: Math.round(viewportHeight * 1.5),
+    closest: selector => bookWalker && selector === '#renderer .currentScreen' ? viewer : null };
   class Scratch {
     constructor(width, height) { this.width = width; this.height = height; }
     getContext() {
@@ -34,12 +35,15 @@ async function detectCompositedCanvas({ left = 260, top = 0, width = 1188, heigh
       } };
     }
   }
-  const document = { body: {}, documentElement: { appendChild() {} }, querySelectorAll: () => [canvas],
-    getElementById: () => null, createElement: () => ({ style: {}, appendChild() {}, remove() {} }) };
+  const document = { body: {}, documentElement: { appendChild() {} }, querySelectorAll: selector =>
+    selector === '#renderer canvas.dummy' ? [{ width: 1409, height: 2000 }, { width: 705, height: 1000 }] : [canvas],
+    getElementById: id => id === 'zoomDefaultBtn' && zoomed ? { disabled: false } : null,
+    createElement: () => ({ style: {}, appendChild() {}, remove() {} }) };
   const chrome = { runtime: { onConnect: { addListener() {} }, onMessage: { addListener(fn) { listener = fn; } },
     async sendMessage(message) { messages.push(message); return { ok: true, region: message.region }; } } };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../chrome-extension/content.js'), 'utf8'), {
     window: {}, document, chrome, OffscreenCanvas: Scratch,
+    location: { hostname: bookWalker ? 'viewer.bookwalker.jp' : 'example.test' },
     sessionStorage: { getItem: () => null, setItem() {} },
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1', position: 'static' }),
     innerWidth: viewportWidth, innerHeight: viewportHeight, setTimeout() {}
@@ -85,6 +89,19 @@ test('opaque, empty, sparse and unreadable canvases retain DOM and screenshot de
     assert.equal(result.region.width, 1707, JSON.stringify(options));
     assert.equal(messages.length, 1, JSON.stringify(options));
   }
+});
+
+test('BookWalker unreadable and opaque viewport canvases request screen fitting using DOM buffer dimensions', async () => {
+  for (const options of [{ opaqueOutside: true }, { tainted: true }]) {
+    const { messages } = await detectCompositedCanvas({ ...options, bookWalker: true });
+    assert.equal(messages[0].pageHint.aspect, 1409 / 2000);
+    assert.equal(messages[0].pageHint.count, 2);
+  }
+});
+
+test('BookWalker zoomed views do not request fitting to an unzoomed page', async () => {
+  const { messages } = await detectCompositedCanvas({ opaqueOutside: true, bookWalker: true, zoomed: true });
+  assert.equal(messages[0].pageHint, undefined);
 });
 
 async function detectTiledSpread({ singlePage = false, hiddenExtra = false, incomplete = false,

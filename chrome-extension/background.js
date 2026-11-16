@@ -213,7 +213,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         action: "trim-black-borders",
         dataUrl,
         region: message.region,
-        viewport: message.viewport
+        viewport: message.viewport,
+        ...(message.pageHint ? { pageHint: message.pageHint } : {})
       });
     }
     const stored = await chrome.runtime.sendMessage({

@@ -99,6 +99,23 @@
     }
   }
 
+  function compositedPageHint(element) {
+    if (typeof location === "undefined" || location.hostname !== "viewer.bookwalker.jp" ||
+        element.tagName !== "CANVAS" || !element.closest("#renderer .currentScreen")) return null;
+    const resetZoom = document.getElementById("zoomDefaultBtn");
+    if (resetZoom && !resetZoom.disabled) return null;
+    // BookWalker can paint an opaque background into its viewport canvas. Its
+    // DOM page buffers expose the page sizes even when pixels are unreadable.
+    // Read dimensions only; never read the hidden buffers' pixels or sources.
+    const pages = [...document.querySelectorAll("#renderer canvas.dummy")]
+      .filter(canvas => canvas.height >= 500 && canvas.width >= 300 &&
+        canvas.width / canvas.height >= 0.4 && canvas.width / canvas.height <= 0.95);
+    if (!pages.length || pages.length > 2) return null;
+    const aspect = pages[0].width / pages[0].height;
+    if (pages.some(canvas => Math.abs(canvas.width / canvas.height - aspect) > 0.02)) return null;
+    return { aspect, count: pages.length };
+  }
+
   async function autoDetectRegion() {
     const viewportArea = innerWidth * innerHeight;
     const centerX = innerWidth / 2;
@@ -267,10 +284,12 @@
     region.height = Math.min(region.height, innerHeight - region.top);
     let refined = region;
     try {
+      const pageHint = compositedPageHint(best.element);
       const result = !hasCanvasPageRect && await chrome.runtime.sendMessage({
         action: "trim-black-borders",
         region,
-        viewport: { width: innerWidth, height: innerHeight }
+        viewport: { width: innerWidth, height: innerHeight },
+        ...(pageHint ? { pageHint } : {})
       });
       if (result?.ok && result.region) refined = result.region;
     } catch {

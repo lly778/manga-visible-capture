@@ -131,10 +131,65 @@ async function cropToBytes(message) {
   return { bytes: await encode(), fingerprint };
 }
 
+function fitCompositedPageBounds(message, bitmap) {
+  const hint = message.pageHint;
+  if (!hint || !Number.isFinite(hint.aspect) || hint.aspect < 0.4 || hint.aspect > 0.95 ||
+      ![1, 2].includes(hint.count)) return null;
+  const region = message.region;
+  const scale = Math.min(1, 1024 / region.width, 1024 / region.height);
+  const width = Math.max(1, Math.round(region.width * scale));
+  const height = Math.max(1, Math.round(region.height * scale));
+  const canvas = new OffscreenCanvas(width, height);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(bitmap, region.left * bitmap.width / message.viewport.width,
+    region.top * bitmap.height / message.viewport.height,
+    region.width * bitmap.width / message.viewport.width,
+    region.height * bitmap.height / message.viewport.height, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const ink = [];
+  // Exclude edge toolbars and controls. This verifies geometry against the
+  // visible screen; it does not trim the artwork's white pixels.
+  for (let y = Math.ceil(height * 0.08); y < height * 0.92; y++) {
+    for (let x = Math.ceil(width * 0.005); x < width * 0.995; x++) {
+      const offset = (y * width + x) * 4;
+      if (Math.min(pixels[offset], pixels[offset + 1], pixels[offset + 2]) < 240) ink.push(y * width + x);
+    }
+  }
+  if (ink.length < width * height * 0.005) return null;
+  for (const count of [hint.count, 3 - hint.count]) {
+    const aspect = hint.aspect * count;
+    const pageWidth = Math.min(region.width, region.height * aspect);
+    const pageHeight = Math.min(region.height, region.width / aspect);
+    if (pageWidth < 180 || pageHeight < 180) continue;
+    const left = (region.width - pageWidth) / 2;
+    const top = (region.height - pageHeight) / 2;
+    let outside = 0;
+    const tolerance = 2;
+    for (const position of ink) {
+      const x = position % width;
+      const y = Math.floor(position / width);
+      const cssX = (x + 0.5) * region.width / width;
+      const cssY = (y + 0.5) * region.height / height;
+      if (cssX < left - tolerance || cssX > left + pageWidth + tolerance ||
+          cssY < top - tolerance || cssY > top + pageHeight + tolerance) outside++;
+    }
+    if (outside > Math.max(12, ink.length * 0.002)) continue;
+    // Round outward so page-edge pixels and the book's own white borders stay.
+    const x = Math.floor(region.left + left);
+    const y = Math.floor(region.top + top);
+    return { left: x, top: y,
+      width: Math.ceil(region.left + left + pageWidth) - x,
+      height: Math.ceil(region.top + top + pageHeight) - y };
+  }
+  return null;
+}
+
 async function trimBlackBorders(message) {
   const response = await fetch(message.dataUrl);
   const bitmap = await createImageBitmap(await response.blob());
   try {
+    const composed = fitCompositedPageBounds(message, bitmap);
+    if (composed) return composed;
     const scaleX = bitmap.width / message.viewport.width;
     const scaleY = bitmap.height / message.viewport.height;
     const sourceX = Math.max(0, Math.round(message.region.left * scaleX));
