@@ -52,6 +52,53 @@
     return { left, top, width: right - left, height: bottom - top };
   }
 
+  function canvasPageRect(canvas, rect) {
+    // Composited readers can use one viewport-sized canvas for a smaller page
+    // or spread. Transparent pixels belong to the viewer; opaque white pixels
+    // may be the book's own margins and must be retained.
+    if (canvas.tagName !== "CANVAS" || !canvas.width || !canvas.height ||
+        rect.width * rect.height < innerWidth * innerHeight * 0.4) return null;
+    try {
+      const scale = Math.min(1, 2048 / canvas.width, 2048 / canvas.height);
+      const width = Math.max(1, Math.round(canvas.width * scale));
+      const height = Math.max(1, Math.round(canvas.height * scale));
+      const scratch = new OffscreenCanvas(width, height);
+      const context = scratch.getContext("2d", { willReadFrequently: true });
+      context.drawImage(canvas, 0, 0, width, height);
+      const data = context.getImageData(0, 0, width, height).data;
+      let left = width, top = height, right = -1, bottom = -1, opaque = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (data[(y * width + x) * 4 + 3] < 16) continue;
+          left = Math.min(left, x);
+          right = Math.max(right, x);
+          top = Math.min(top, y);
+          bottom = Math.max(bottom, y);
+          opaque++;
+        }
+      }
+      const pageWidth = right - left + 1;
+      const pageHeight = bottom - top + 1;
+      // Do not turn a sparse overlay, drawing, missing page or empty canvas
+      // into a page boundary. Only accept a substantial rectangular raster.
+      if (pageWidth < width * 0.3 || pageHeight < height * 0.75 ||
+          opaque < pageWidth * pageHeight * 0.98 ||
+          pageWidth >= width * 0.995 && pageHeight >= height * 0.995) return null;
+      const result = {
+        left: rect.left + left * rect.width / width,
+        top: rect.top + top * rect.height / height,
+        width: pageWidth * rect.width / width,
+        height: pageHeight * rect.height / height
+      };
+      if (result.width < 180 || result.height < 180 ||
+          result.width / result.height < 0.4 || result.width / result.height > 2.2) return null;
+      return { ...result, right: result.left + result.width, bottom: result.top + result.height };
+    } catch {
+      // Unreadable or tainted canvases retain the existing DOM/screen fallback.
+      return null;
+    }
+  }
+
   async function autoDetectRegion() {
     const viewportArea = innerWidth * innerHeight;
     const centerX = innerWidth / 2;
@@ -74,12 +121,19 @@
       }
     }
 
+    const canvasRects = new Map();
+    const pageRect = (element) => {
+      const raw = element.getBoundingClientRect();
+      if (element.tagName !== "CANVAS") return raw;
+      if (!canvasRects.has(element)) canvasRects.set(element, canvasPageRect(element, raw));
+      return canvasRects.get(element) || raw;
+    };
     let best = null;
     for (const element of candidates) {
       if (element.closest("#vmc-progress-panel,#vmc-select-overlay,#vmc-detect-preview")) continue;
       const style = getComputedStyle(element);
       if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) < 0.08) continue;
-      const raw = element.getBoundingClientRect();
+      const raw = pageRect(element);
       const rect = clampRect(raw);
       if (rect.width < 180 || rect.height < 180) continue;
       const area = rect.width * rect.height;
@@ -126,7 +180,7 @@
       if (!inside) continue;
       const style = getComputedStyle(element);
       if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) < 0.08) continue;
-      const image = clampRect(element.getBoundingClientRect());
+      const image = clampRect(pageRect(element));
       const imageBottomCandidate = image.top + image.height;
       const aspect = image.width / image.height;
       if (image.top < outer.top - 8 || imageBottomCandidate > outerBottom + 8 ||
@@ -157,7 +211,7 @@
         }
       }
       if (!inside || !visible) continue;
-      const raw = element.getBoundingClientRect();
+      const raw = pageRect(element);
       const image = clampRect(raw);
       const right = image.left + image.width;
       const bottom = image.top + image.height;
@@ -201,7 +255,8 @@
       best.region = { left, top, width: right - left, height: bottom - top };
     }
 
-    const margin = 2;
+    const hasCanvasPageRect = Boolean(canvasRects.get(best.element));
+    const margin = hasCanvasPageRect ? 0 : 2;
     const region = {
       left: Math.max(0, Math.round(best.region.left - margin)),
       top: Math.max(0, Math.round(best.region.top - margin)),
@@ -212,7 +267,7 @@
     region.height = Math.min(region.height, innerHeight - region.top);
     let refined = region;
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = !hasCanvasPageRect && await chrome.runtime.sendMessage({
         action: "trim-black-borders",
         region,
         viewport: { width: innerWidth, height: innerHeight }
