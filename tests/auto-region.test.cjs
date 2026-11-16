@@ -4,37 +4,18 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-async function detectCompositedCanvas({ left = 260, top = 0, width = 1188, height = 842,
-  viewportWidth = 1707, viewportHeight = 842, opaqueOutside = false, sparse = false,
-  tainted = false, empty = false, bookWalker = false, zoomed = false } = {}) {
+async function detectViewportCanvas({ bookWalker = true, zoomed = false } = {}) {
   let listener;
   const messages = [];
+  const viewportWidth = 1707, viewportHeight = 898;
   const viewer = { tagName: 'DIV', id: 'viewer', className: 'viewer', parentElement: null,
     closest: () => null,
     getBoundingClientRect: () => ({ left: 0, top: 0, right: viewportWidth, bottom: viewportHeight,
       width: viewportWidth, height: viewportHeight }) };
   const canvas = { ...viewer, tagName: 'CANVAS', id: '', className: '', parentElement: viewer,
-    width: Math.round(viewportWidth * 1.5), height: Math.round(viewportHeight * 1.5),
-    closest: selector => bookWalker && selector === '#renderer .currentScreen' ? viewer : null };
-  class Scratch {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      return { drawImage() {}, getImageData: () => {
-        if (tainted) throw new Error('SecurityError');
-        const data = new Uint8ClampedArray(this.width * this.height * 4);
-        for (let y = 0; y < this.height; y++) for (let x = 0; x < this.width; x++) {
-          const cssX = (x + 0.5) * viewportWidth / this.width;
-          const cssY = (y + 0.5) * viewportHeight / this.height;
-          const inPage = cssX >= left && cssX < left + width && cssY >= top && cssY < top + height;
-          const offset = (y * this.width + x) * 4;
-          // The book is entirely white and still has a real page boundary.
-          data[offset] = data[offset + 1] = data[offset + 2] = 255;
-          data[offset + 3] = !empty && (opaqueOutside || inPage && (!sparse || x % 3 === 0)) ? 255 : 0;
-        }
-        return { data };
-      } };
-    }
-  }
+    width: 2561, height: 1347,
+    closest: selector => bookWalker && selector === '#renderer .currentScreen' ? viewer : null,
+    getContext() { throw new Error('Viewport canvas pixels are unreadable'); } };
   const document = { body: {}, documentElement: { appendChild() {} }, querySelectorAll: selector =>
     selector === '#renderer canvas.dummy' ? [{ width: 1409, height: 2000 }, { width: 705, height: 1000 }] : [canvas],
     getElementById: id => id === 'zoomDefaultBtn' && zoomed ? { disabled: false } : null,
@@ -42,7 +23,7 @@ async function detectCompositedCanvas({ left = 260, top = 0, width = 1188, heigh
   const chrome = { runtime: { onConnect: { addListener() {} }, onMessage: { addListener(fn) { listener = fn; } },
     async sendMessage(message) { messages.push(message); return { ok: true, region: message.region }; } } };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../chrome-extension/content.js'), 'utf8'), {
-    window: {}, document, chrome, OffscreenCanvas: Scratch,
+    window: {}, document, chrome,
     location: { hostname: bookWalker ? 'viewer.bookwalker.jp' : 'example.test' },
     sessionStorage: { getItem: () => null, setItem() {} },
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1', position: 'static' }),
@@ -52,55 +33,25 @@ async function detectCompositedCanvas({ left = 260, top = 0, width = 1188, heigh
   return { result, messages };
 }
 
-test('a BookWalker-style viewport canvas excludes transparent outer margins and preserves opaque white page edges', async () => {
-  const { result, messages } = await detectCompositedCanvas();
+test('BookWalker viewport detection requests screenshot fitting using only DOM page dimensions', async () => {
+  const { result, messages } = await detectViewportCanvas();
   assert.equal(result.ok, true);
-  assert.ok(Math.abs(result.region.left - 260) <= 2, JSON.stringify(result.region));
-  assert.ok(Math.abs(result.region.width - 1188) <= 3, JSON.stringify(result.region));
-  assert.equal(result.region.top, 0);
-  assert.equal(result.region.height, 842);
-  assert.equal(messages.length, 0, 'known page bounds must not be trimmed again based on artwork colors');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].pageHint.aspect, 1409 / 2000);
+  assert.equal(messages[0].pageHint.count, 2);
 });
 
-test('a narrow single-page compositing canvas excludes both side gutters', async () => {
-  const { result } = await detectCompositedCanvas({ viewportWidth: 827, viewportHeight: 840,
-    left: 117, width: 593, height: 840 });
-  assert.ok(Math.abs(result.region.left - 117) <= 2);
-  assert.ok(Math.abs(result.region.width - 593) <= 3);
-});
-
-test('transparent top and bottom canvas margins are excluded with the side margins', async () => {
-  const { result } = await detectCompositedCanvas({ left: 330, top: 90, width: 1048, height: 752,
-    viewportHeight: 932 });
-  assert.ok(Math.abs(result.region.top - 90) <= 2, JSON.stringify(result.region));
-  assert.ok(Math.abs(result.region.height - 752) <= 3, JSON.stringify(result.region));
-});
-
-test('a left-positioned portrait inside a compositing canvas still reserves the second page', async () => {
-  const { result } = await detectCompositedCanvas({ left: 260, width: 594 });
-  assert.ok(Math.abs(result.region.left - 260) <= 2);
-  assert.ok(Math.abs(result.region.width - 1188) <= 4, JSON.stringify(result.region));
-});
-
-test('opaque, empty, sparse and unreadable canvases retain DOM and screenshot detection', async () => {
-  for (const options of [{ opaqueOutside: true }, { empty: true }, { sparse: true }, { tainted: true }]) {
-    const { result, messages } = await detectCompositedCanvas(options);
-    assert.equal(result.region.left, 0, JSON.stringify(options));
-    assert.equal(result.region.width, 1707, JSON.stringify(options));
-    assert.equal(messages.length, 1, JSON.stringify(options));
-  }
-});
-
-test('BookWalker unreadable and opaque viewport canvases request screen fitting using DOM buffer dimensions', async () => {
-  for (const options of [{ opaqueOutside: true }, { tainted: true }]) {
-    const { messages } = await detectCompositedCanvas({ ...options, bookWalker: true });
-    assert.equal(messages[0].pageHint.aspect, 1409 / 2000);
-    assert.equal(messages[0].pageHint.count, 2);
-  }
+test('other readers retain DOM and screenshot detection without BookWalker geometry', async () => {
+  const { result, messages } = await detectViewportCanvas({ bookWalker: false });
+  assert.equal(result.ok, true);
+  assert.equal(result.region.width, 1707);
+  assert.equal(result.region.height, 898);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].pageHint, undefined);
 });
 
 test('BookWalker zoomed views do not request fitting to an unzoomed page', async () => {
-  const { messages } = await detectCompositedCanvas({ opaqueOutside: true, bookWalker: true, zoomed: true });
+  const { messages } = await detectViewportCanvas({ zoomed: true });
   assert.equal(messages[0].pageHint, undefined);
 });
 
